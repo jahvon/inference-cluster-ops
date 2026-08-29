@@ -1,0 +1,202 @@
+# yaml-language-server: $schema=https://flowexec.io/schemas/flowfile_schema.json
+visibility: public
+tags: [inference, vllm, model]
+description: |
+  Talking to the model, and debugging it when it will not talk back.
+
+  The endpoints here go through the SSH tunnel, which every one of them opens for
+  itself if it is not already up -- there is no separate step to remember.
+
+executables:
+  - verb: open
+    name: tunnel
+    aliases: [forward, proxy]
+    description: |
+      Open the SSH tunnel in the background and return immediately.
+
+        localhost:6443   the cluster, for kubectl
+        localhost:8000   vLLM, through Envoy
+
+      Backgrounded on purpose: it is what lets `test chat`, `list models` and
+      `open dashboard` work without keeping a terminal parked on a foreground
+      process. Idempotent, so running it twice is harmless.
+
+      Only port 22 is open on the node, and only to your address -- everything
+      else rides inside this one session, which is why no other port is ever
+      exposed.
+    exec:
+      dir: //
+      cmd: bash scripts/tunnel.sh ensure
+
+  - verb: disconnect
+    name: tunnel
+    aliases: [close]
+    description: Tear down the background tunnel. Matches only the one this workspace opened.
+    exec:
+      dir: //
+      cmd: bash scripts/tunnel.sh close
+
+  - verb: test
+    name: chat
+    aliases: [prompt, ask]
+    description: |
+      Send one prompt and print the reply.
+
+      Qwen3 reasons before answering, so the thinking trace is separated from the
+      answer rather than arriving inline in `<think>` tags.
+
+      Quotes and newlines in the prompt are safe -- the body is built with
+      `toJSON`, which escapes them. A literal `$` is not: flow expands `$word` in
+      argument values and drops what it cannot resolve.
+    serial:
+      dir: //
+      args:
+        - pos: 1
+          envKey: PROMPT
+          default: Say hello in exactly five words.
+      execs:
+        - name: tunnel
+          cmd: bash scripts/tunnel.sh ensure
+        # TODO: patch flow arg passthrough bug
+        - ref: send prompt
+          args: ["-"]
+
+  - verb: send
+    name: prompt
+    visibility: internal
+    request:
+      args:
+        - pos: 1
+          envKey: PROMPT
+          default: Say hello in exactly five words.
+      method: POST
+      url: http://localhost:8000/v1/chat/completions
+      headers:
+        Content-Type: application/json
+      # The body is an Expr expression. toJSON escapes both user-controlled strings, so a prompt
+      # containing quotes, newlines or a $ just works.
+      body: >
+        '{"model":' + toJSON(env["SERVED_MODEL_NAME"]) +
+        ',"messages":[{"role":"user","content":' + toJSON(env["PROMPT"]) + '}]' +
+        ',"max_tokens":' + env["MAX_TOKENS"] + '}'
+      params:
+        # envFile paths resolve against the flow file's own directory, so this
+        # reaches up out of .execs/.
+        - envKey: SERVED_MODEL_NAME
+          envFile: ../k8s/config.env
+        - envKey: MAX_TOKENS
+          text: "256"
+      timeout: 5m
+      validStatusCodes: [200]
+      logResponse: true
+      # Qwen3 reasons before answering. Splitting reasoning_content out here is
+      # the whole reason this is a transform and not a raw response dump.
+      transformResponse: >
+        let m = fromJSON(body)["choices"][0]["message"];
+        let u = fromJSON(body)["usage"];
+        (m["reasoning_content"] != nil ? "[thinking] " + m["reasoning_content"] + "\n\n" : "") +
+        m["content"] +
+        "\n\n(" + toJSON(u["prompt_tokens"]) + " prompt + " + toJSON(u["completion_tokens"]) + " completion tokens)"
+
+  - verb: list
+    name: models
+    aliases: [served]
+    description: |
+      Which model the server is actually serving, and the name clients should put
+      in the `model` field of a request.
+    serial:
+      dir: //
+      execs:
+        - name: tunnel
+          cmd: bash scripts/tunnel.sh ensure
+        - ref: get models
+
+  - verb: get
+    name: models
+    visibility: internal
+    request:
+      method: GET
+      url: http://localhost:8000/v1/models
+      validStatusCodes: [200]
+      logResponse: true
+      transformResponse: 'join(map(fromJSON(body)["data"], #["id"]), "\n")'
+
+  - verb: check
+    name: health
+    aliases: [ping]
+    description: |
+      Quick yes/no on whether vLLM is answering through Envoy.
+
+      A 200 means the whole path is live: tunnel, Envoy, and at least one pod
+      passing its readiness probe.
+    serial:
+      dir: //
+      execs:
+        - name: tunnel
+          cmd: bash scripts/tunnel.sh ensure
+        - ref: get health
+
+  - verb: get
+    name: health
+    visibility: internal
+    request:
+      method: GET
+      url: http://localhost:8000/health
+      timeout: 10s
+      validStatusCodes: [200]
+      transformResponse: '"vLLM is healthy"'
+
+  - verb: show
+    name: logs
+    aliases: [vllm-logs]
+    description: Tail vLLM logs across every replica. Where to look when the model will not load.
+    exec:
+      dir: //
+      cmd: make logs
+
+  - verb: show
+    name: proxy-logs
+    aliases: [envoy-logs]
+    description: |
+      Tail Envoy's logs.
+
+      Distinct from the vLLM logs: routing failures, upstream connection errors
+      and truncated streams show up here, not there.
+    exec:
+      dir: //
+      cmd: make envoy-logs
+
+  - verb: show
+    name: boot-logs
+    aliases: [startup]
+    description: |
+      The node bootstrap log: data disk mount, GPU driver wait, k3s install.
+
+      Check here first when a fresh boot never becomes healthy -- a failed disk
+      mount, or a k3s install that could not find the nvidia runtime, shows up
+      here and not in the vLLM logs.
+    exec:
+      dir: //
+      cmd: make boot-logs
+
+  - verb: watch
+    name: gpu
+    aliases: [nvidia-smi, vram]
+    description: |
+      GPU utilization and VRAM.
+
+      The number to watch is memory used: vLLM preallocates its KV cache at load,
+      so near-full at idle is expected, not a leak. With N replicas you should see
+      N processes, and their total must stay under 24GB -- time-slicing will not
+      enforce that for you.
+    exec:
+      dir: //
+      cmd: make gpu
+
+  - verb: connect
+    name: node
+    aliases: [ssh, shell]
+    description: SSH to the node. kubectl is on PATH there and already pointed at the local cluster.
+    exec:
+      dir: //
+      cmd: make ssh

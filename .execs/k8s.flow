@@ -1,0 +1,147 @@
+# yaml-language-server: $schema=https://flowexec.io/schemas/flowfile_schema.json
+visibility: public
+tags: [k8s, rollout, deploy]
+description: The workload layer. Deploying, rolling out model versions, and reaching the cluster.
+
+executables:
+  - verb: deploy
+    name: workloads
+    aliases: [apply, k8s]
+    description: |
+      Apply everything in `k8s/` to the node's cluster: the device plugin, Envoy,
+      the vLLM Rollout, Prometheus and Grafana.
+
+      This is how you change the model, the replica count, or anything else about
+      the workload -- and it needs no reboot.
+
+      Changing the model starts a canary rather than restarting every replica at
+      once. Watch it with `show rollout`.
+    exec:
+      dir: //
+      cmd: make deploy
+
+  - verb: scale
+    name: workers
+    aliases: [replicas]
+    description: |
+      Set how many vLLM pods share the GPU. They sit behind Envoy on one endpoint,
+      so what clients talk to never changes.
+
+      Each pod gets 1/N of the VRAM budget automatically -- vLLM's
+      gpu_memory_utilization is a fraction of TOTAL memory, and GPU time-slicing
+      gives no memory isolation, so nothing but that division stops the pods
+      OOMing each other.
+
+      N must not exceed `GPU_TIMESLICE_REPLICAS` in `k8s/config.env`, or the
+      surplus pods sit Pending with no slice to claim.
+    exec:
+      dir: //
+      args:
+        - pos: 1
+          envKey: VLLM_REPLICAS
+          required: true
+      cmd: make deploy
+
+  - verb: generate
+    name: manifests
+    aliases: [dry-run, render]
+    description: |
+      Render `k8s/` into `k8s/rendered/` and validate it, without touching a
+      cluster.
+
+      Checks that every variable was substituted, that nothing that should have
+      been left alone was, and that each document is a well-formed object. The
+      only correctness gate available before the node exists.
+    exec:
+      dir: //
+      cmd: make render
+
+  - verb: validate
+    name: proxy
+    aliases: [envoy]
+    description: |
+      Have Envoy itself parse the generated config.
+
+      A malformed Envoy config does not fail at apply -- the pod accepts it and
+      then crash-loops on a parse error, which is a slow way to find a typo. This
+      catches it locally and needs only Docker.
+    exec:
+      dir: //
+      cmd: make envoy-validate
+
+  - verb: show
+    name: rollout
+    aliases: [canary, replicas]
+    description: |
+      Watch the canary: which pods are on the stable version, which are on the
+      canary, what step it is paused at, and how the latency analysis is going.
+
+      `show status` answers "is it serving". This answers "which version is
+      serving, and to how much of the fleet" -- the question that matters during a
+      model change.
+    exec:
+      dir: //
+      cmd: make rollout-status
+
+  - verb: release
+    name: rollout
+    aliases: [canary, promote]
+    description: |
+      Advance the canary past its current step, or finish the rollout if it is
+      waiting on the final pause.
+
+      Only needed for steps that pause indefinitely; the analysis steps advance on
+      their own when measured latency stays under threshold.
+    exec:
+      dir: //
+      cmd: make promote
+
+  - verb: abort
+    name: rollout
+    aliases: [rollback, canary]
+    description: |
+      Roll back to the stable version immediately.
+    exec:
+      dir: //
+      cmd: make abort
+
+  - verb: show
+    name: pods
+    aliases: [k8s-status]
+    description: Every pod in the cluster with its node and IP. The first place to look when something will not start.
+    exec:
+      logMode: text
+      dir: //
+      cmd: make pods
+
+  - verb: connect
+    name: kube
+    aliases: [kubeconfig, creds]
+    description: |
+      Fetch the cluster credential to `./kubeconfig` (gitignored) and open the
+      tunnel, so local kubectl works.
+    serial:
+      dir: //
+      execs:
+        - name: kubeconfig
+          cmd: make kubeconfig
+        - name: tunnel
+          cmd: bash scripts/tunnel.sh ensure
+        - name: usage
+          cmd: echo "  export KUBECONFIG=$PWD/kubeconfig"
+
+  - verb: open
+    name: dashboard
+    aliases: [grafana, dash]
+    description: |
+      Grafana on localhost:3000, port-forwarded through the tunnel.
+
+      Runs in the foreground; Ctrl-C closes it. Prints the command that reads the
+      admin password out of the cluster.
+    serial:
+      dir: //
+      execs:
+        - name: tunnel
+          cmd: bash scripts/tunnel.sh ensure
+        - name: grafana
+          cmd: make dash

@@ -1,0 +1,118 @@
+# vLLM as an Argo Rollout rather than a Deployment, so a model change is a testable
+# canary rather than a simultaneous restart of every replica.
+#
+# There is no traffic router. This is a BASIC canary -- the controller scales the
+# canary and stable ReplicaSets to approximate setWeight and Envoy balances across
+# whatever pods are Ready.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: vllm
+  namespace: inference
+  labels: { app: vllm }
+spec:
+  replicas: ${VLLM_REPLICAS}
+
+  # Default is 600s, which a first-boot weight download blows straight through --
+  # Argo would abort and roll back a rollout that was merely slow.
+  progressDeadlineSeconds: 3600
+
+  selector:
+    matchLabels: { app: vllm }
+
+  strategy:
+    canary:
+      # Declared for METRICS SEPARATION, not traffic weighting. Argo maintains
+      # these Services' selectors via rollouts-pod-template-hash even with no
+      # traffic router, which is what lets Prometheus tell canary from stable.
+      canaryService: vllm-canary
+      stableService: vllm-stable
+
+      # Sparse inference capacity is expected.
+      maxSurge: 0
+      maxUnavailable: 1
+
+      steps:
+        # NOT a traffic weight. With no trafficRouting block Argo has no channel
+        # to Envoy, so this sets the REPLICA RATIO: how many pods run the new
+        # version. The traffic split is emergent -- Envoy least-requests across
+        # whatever pods are Ready, so one-of-N pods on the new version becomes
+        # ~1/N of traffic on its own.
+        #
+        # Derived as 100/VLLM_REPLICAS, i.e. exactly one canary pod, so changing
+        # the replica count cannot leave this stale. A finer value would round to
+        # the same single pod and only read as if it meant something.
+        #
+        # With maxSurge: 0 this converts a pod rather than adding one: a stable
+        # pod is terminated first, so the fleet never grows.
+        - setWeight: ${CANARY_WEIGHT}
+
+        # No separate warm-up pause -- the analysis carries its own initialDelay,
+        # which keeps "how long before this measurement is meaningful" attached
+        # to the measurement instead of floating as a step above it.
+        - analysis:
+            templates:
+              - templateName: vllm-latency
+
+        # Indefinite. The analysis above is the automated gate; this is the
+        # human one, and it stays until TTFT_P95_THRESHOLD has been set from a
+        # measured baseline rather than a guess. Once it has, delete this step
+        # and a passing analysis promotes on its own.
+        - pause: {}
+
+  template:
+    metadata:
+      labels: { app: vllm }
+    spec:
+      containers:
+        - name: vllm
+          image: ${VLLM_IMAGE}
+          ports:
+            - { name: http, containerPort: 8000 }
+          command: ["/bin/sh", "-c"]
+          # Model configuration is substituted into the pod template here, NOT read
+          # from a ConfigMap. Argo only rolls out when the pod-template hash
+          # changes, so a ConfigMap would make a model change a silent no-op: no
+          # canary, and pods left running the old model.
+          args:
+            - >
+              exec vllm serve "${MODEL_ID}"
+              --served-model-name "${SERVED_MODEL_NAME}"
+              --max-model-len ${MAX_MODEL_LEN}
+              --gpu-memory-utilization ${GPU_MEM_UTIL}
+              --kv-cache-memory-bytes ${KV_CACHE_BYTES}
+              --tensor-parallel-size 1
+              --host 0.0.0.0 --port 8000
+              ${EXTRA_VLLM_ARGS}
+          env:
+            # optional: Only gated models (Llama, Gemma) need it.
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: token
+                  optional: true
+            - { name: HF_HUB_ENABLE_HF_TRANSFER, value: "1" }
+          resources:
+            requests: { cpu: 500m, memory: 2Gi }
+            limits:
+              memory: 8Gi
+              # One time slice, not the whole GPU. Note this grants no memory
+              # isolation -- the --gpu-memory-utilization above is what actually
+              # keeps the pods out of each other's VRAM.
+              nvidia.com/gpu: 1
+          # A first boot downloads weights and a pod can take many minutes to
+          # answer. Readiness failures never restart a pod (only liveness does, and
+          # there deliberately is none) -- this just keeps it out of the Service
+          # until it can serve.
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 10
+            failureThreshold: 90
+          volumeMounts:
+            - { name: hf-cache, mountPath: /root/.cache/huggingface }
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: ${HF_CACHE_HOSTPATH}
+            type: DirectoryOrCreate

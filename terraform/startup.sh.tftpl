@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Node bootstrap. Runs on EVERY boot, so every step must be idempotent.
+#
+# Deliberately stops at "a k3s cluster with a GPU exists". No workloads are
+# deployed here: the k3s data-dir lives on the persistent disk, so anything
+# deployed once restores itself on the next boot AND after a spot rebuild.
+# Workload changes go through `make deploy`, which needs no reboot.
+set -uo pipefail
+exec > >(tee -a /var/log/node-bootstrap.log) 2>&1
+
+echo "=================================================="
+echo "node bootstrap: $(date -Is)"
+echo "=================================================="
+
+DATA_DEV="/dev/disk/by-id/google-data"
+DATA_MNT="${data_mount}"
+K3S_STORAGE="/var/lib/rancher/k3s/storage"
+
+# ---------------------------------------------------------------------------
+# 1. Data disk
+#
+# This block runs on every boot, so the format MUST be conditional. An
+# unconditional mkfs here would silently destroy model weights, the Prometheus
+# TSDB, and the whole cluster state on the second start -- which is exactly the
+# disk that exists to survive VM replacement.
+# ---------------------------------------------------------------------------
+if [ -b "$DATA_DEV" ]; then
+  if blkid "$DATA_DEV" >/dev/null 2>&1; then
+    echo "[disk] already formatted -- preserving contents"
+  else
+    echo "[disk] blank device -- formatting ext4 (first use only)"
+    mkfs.ext4 -m 0 -F -E lazy_itable_init=0,lazy_journal_init=0,discard "$DATA_DEV"
+  fi
+
+  mkdir -p "$DATA_MNT"
+  mountpoint -q "$DATA_MNT" || mount -o discard,defaults "$DATA_DEV" "$DATA_MNT"
+
+  DATA_UUID=$(blkid -s UUID -o value "$DATA_DEV")
+  if ! grep -q "$DATA_UUID" /etc/fstab; then
+    # nofail: never let a missing data disk block the boot
+    echo "UUID=$DATA_UUID $DATA_MNT ext4 discard,defaults,nofail 0 2" >> /etc/fstab
+  fi
+
+  echo "[disk] mounted: $(df -h "$DATA_MNT" | tail -1)"
+else
+  echo "[disk] WARNING: $DATA_DEV absent -- falling back to the boot disk."
+  echo "[disk] NOTHING will survive instance replacement."
+  DATA_MNT="/var/lib/inference-data"
+fi
+
+mkdir -p "$DATA_MNT"/{huggingface,k3s,storage}
+
+# ---------------------------------------------------------------------------
+# 2. Persistent PVC storage
+#
+# k3s's built-in local-path-provisioner writes to /var/lib/rancher/k3s/storage,
+# which is on the BOOT disk and therefore destroyed on every spot rebuild --
+# taking the Prometheus TSDB with it. --data-dir does NOT relocate it.
+#
+# Bind-mounting is used rather than patching the local-path-config ConfigMap:
+# k3s ships that ConfigMap as a bundled manifest and its deploy controller
+# re-applies it on upgrade, silently reverting the path. A bind mount cannot be
+# reverted from inside the cluster, and it keeps a host-specific path out of the
+# portable k8s/ directory.
+# ---------------------------------------------------------------------------
+mkdir -p "$K3S_STORAGE"
+if ! mountpoint -q "$K3S_STORAGE"; then
+  mount --bind "$DATA_MNT/storage" "$K3S_STORAGE"
+fi
+if ! grep -q "$K3S_STORAGE" /etc/fstab; then
+  echo "$DATA_MNT/storage $K3S_STORAGE none bind,nofail 0 0" >> /etc/fstab
+fi
+echo "[disk] PVC storage -> $DATA_MNT/storage"
+
+# ---------------------------------------------------------------------------
+# 3. GPU driver
+#
+# The DLVM image installs the driver on first boot, which finishes after this
+# script starts. Poll rather than assume. k3s must not start before this
+# succeeds, or it will not detect the nvidia container runtime.
+# ---------------------------------------------------------------------------
+echo "[gpu] waiting for NVIDIA driver..."
+for attempt in $(seq 1 60); do
+  if nvidia-smi >/dev/null 2>&1; then
+    echo "[gpu] driver ready after $((attempt * 5))s"
+    break
+  fi
+  sleep 5
+done
+
+if ! nvidia-smi; then
+  echo "[gpu] FATAL: no usable GPU after 300s. Not installing k3s."
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 4. k3s
+#
+# --default-runtime nvidia is the single most important flag here. k3s
+# auto-detects the nvidia containerd runtime but leaves runc as the DEFAULT, so
+# without it pods start with no driver libraries and the device plugin dies with
+# "Failed to initialize NVML" -- the classic k3s+GPU failure.
+#
+# --write-kubeconfig-mode 644 is what lets `make kubeconfig` use a plain scp.
+# If it is ever dropped, that target must switch to `ssh sudo cat`.
+# ---------------------------------------------------------------------------
+if command -v k3s >/dev/null 2>&1; then
+  echo "[k3s] already installed ($(k3s --version 2>/dev/null | head -1))"
+  systemctl is-active --quiet k3s || systemctl start k3s
+else
+  echo "[k3s] installing ${k3s_version}"
+  curl -sfL https://get.k3s.io | \
+    INSTALL_K3S_VERSION="${k3s_version}" \
+    INSTALL_K3S_EXEC="--default-runtime nvidia \
+                      --disable traefik \
+                      --disable servicelb \
+                      --disable metrics-server \
+                      --data-dir $DATA_MNT/k3s \
+                      --write-kubeconfig-mode 644" sh -
+fi
+
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+echo 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml' > /etc/profile.d/k3s.sh
+
+echo "[k3s] waiting for the API server..."
+for _ in $(seq 1 60); do
+  [ "$(kubectl get --raw /readyz 2>/dev/null)" = "ok" ] && break
+  sleep 5
+done
+
+if [ "$(kubectl get --raw /readyz 2>/dev/null)" != "ok" ]; then
+  echo "[k3s] FATAL: API server not ready after 300s."
+  journalctl -u k3s --no-pager -n 40
+  exit 1
+fi
+echo "[k3s] API server ready"
+
+# ---------------------------------------------------------------------------
+# 5. Node-side tooling
+#
+# Present so that `make ssh` gives a usable shell, and so bootstrap.sh can also
+# be run directly on the node. The documented path runs it from the laptop.
+# ---------------------------------------------------------------------------
+command -v envsubst >/dev/null 2>&1 || \
+  (apt-get update -qq && apt-get install -y -qq gettext-base)
+
+command -v helm >/dev/null 2>&1 || \
+  curl -sfL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+if ! command -v kubectl-argo-rollouts >/dev/null 2>&1; then
+  curl -sfL -o /usr/local/bin/kubectl-argo-rollouts \
+    https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64 \
+    && chmod +x /usr/local/bin/kubectl-argo-rollouts
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+kubectl get nodes -o wide
+echo ""
+echo "[done] cluster is up. Workloads restore from $DATA_MNT/k3s, or run 'make deploy'."

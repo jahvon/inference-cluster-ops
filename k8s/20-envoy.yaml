@@ -1,0 +1,192 @@
+# Plain Envoy: a Deployment and a ConfigMap. No CRDs, no operator, no Gateway API,
+# so it moves to any cluster unchanged -- and can be dropped entirely if the target
+# cluster already has an ingress or a mesh. Nothing else in k8s/ depends on it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-config
+  namespace: inference
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+        - name: http
+          address: { socket_address: { address: 0.0.0.0, port_value: 8000 } }
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: vllm
+                    # Both timeouts MUST be 0. Envoy's defaults are a 15s route
+                    # timeout and a 5m stream idle timeout -- far shorter than a
+                    # long generation, so requests die mid-stream with no useful
+                    # error.
+                    stream_idle_timeout: 0s
+                    route_config:
+                      name: vllm
+                      virtual_hosts:
+                        - name: vllm
+                          domains: ["*"]
+                          routes:
+                            - match: { prefix: "/" }
+                              route:
+                                cluster: vllm
+                                timeout: 0s
+                                # Losing a worker mid-flight is a routine event
+                                # here -- spot preemption, a rollout, a manual
+                                # drain. Without this, every request Envoy has
+                                # already sent to a dead endpoint is returned to
+                                # the client as a 503.
+                                #
+                                # Safe for generation because a failed connect or
+                                # reset means the request never produced tokens.
+                                retry_policy:
+                                  retry_on: "5xx,reset,connect-failure,refused-stream"
+                                  num_retries: 2
+                                  retry_host_predicate:
+                                    - name: envoy.retry_host_predicates.previous_hosts
+                                      typed_config:
+                                        "@type": type.googleapis.com/envoy.extensions.retry.host.previous_hosts.v3.PreviousHostsPredicate
+                                  host_selection_retry_max_attempts: 3
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+        # Metrics listener. Prometheus cannot scrape the admin interface directly:
+        # it lives in a different pod and cannot reach this one's loopback. Binding
+        # admin to 0.0.0.0 instead would expose /quitquitquit and /drain_listeners
+        # to every pod in the cluster, so this proxies exactly one path to it and
+        # rejects everything else.
+        - name: metrics
+          address: { socket_address: { address: 0.0.0.0, port_value: 9902 } }
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: metrics
+                    route_config:
+                      name: metrics
+                      virtual_hosts:
+                        - name: metrics
+                          domains: ["*"]
+                          routes:
+                            - match: { prefix: "/stats/prometheus" }
+                              route: { cluster: envoy_admin }
+                            - match: { prefix: "/" }
+                              direct_response:
+                                status: 403
+                                body: { inline_string: "only /stats/prometheus is exposed\n" }
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+      clusters:
+        # STRICT_DNS against a HEADLESS service, deliberately. A normal ClusterIP
+        # resolves to a single VIP, so Envoy would see one endpoint and kube-proxy
+        # would do the balancing -- defeating the point. Headless returns every pod
+        # IP, so least-request, retries and outlier detection actually apply.
+        - name: vllm
+          type: STRICT_DNS
+          connect_timeout: 5s
+          dns_lookup_family: V4_ONLY
+          lb_policy: LEAST_REQUEST
+          # Drop an endpoint out of rotation after it refuses connections,
+          # rather than waiting on the DNS refresh to notice it is gone.
+          outlier_detection:
+            consecutive_5xx: 2
+            consecutive_gateway_failure: 2
+            base_ejection_time: 10s
+            max_ejection_percent: 50
+            interval: 2s
+          dns_refresh_rate: 2s
+          load_assignment:
+            cluster_name: vllm
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: vllm-headless.inference.svc.cluster.local
+                          port_value: 8000
+
+        - name: envoy_admin
+          type: STATIC
+          connect_timeout: 1s
+          load_assignment:
+            cluster_name: envoy_admin
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address: { address: 127.0.0.1, port_value: 9901 }
+
+    # Loopback only: the admin interface can drain and shut down the proxy.
+    admin:
+      address: { socket_address: { address: 127.0.0.1, port_value: 9901 } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy
+  namespace: inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: envoy }
+  template:
+    metadata:
+      labels: { app: envoy }
+    spec:
+      containers:
+        - name: envoy
+          image: ${ENVOY_IMAGE}
+          args: ["-c", "/etc/envoy/envoy.yaml"]
+          ports:
+            - { name: http, containerPort: 8000 }
+            - { name: metrics, containerPort: 9902 }
+          # Envoy serves no HTTP readiness endpoint on the data listener, so this
+          # is a TCP check rather than an httpGet.
+          readinessProbe:
+            tcpSocket: { port: 8000 }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/envoy }
+      volumes:
+        - name: config
+          configMap: { name: envoy-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy
+  namespace: inference
+spec:
+  type: NodePort
+  selector: { app: envoy }
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      nodePort: ${ENVOY_NODEPORT}
+---
+# Separate ClusterIP service so the metrics port is scrapeable without also being
+# on a NodePort.
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy-metrics
+  namespace: inference
+  labels: { app: envoy }
+spec:
+  selector: { app: envoy }
+  ports:
+    - name: metrics
+      port: 9902
+      targetPort: 9902

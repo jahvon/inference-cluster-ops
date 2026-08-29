@@ -1,0 +1,45 @@
+# kube-prometheus-stack values.
+#
+# NOT rendered through envsubst -- this file contains Grafana templating ($1,
+# ${__interval}, ${DS_PROMETHEUS}) that a substitution pass would silently eat.
+# Everything here is static, so it is applied as-is. This is the only home for
+# monitoring tuning; k8s/config.env deliberately holds none of it.
+
+# k3s embeds all four of these and does not expose their metrics endpoints.
+# Left enabled, their ServiceMonitors sit permanently red in Prometheus, monitoring
+# nothing.
+kubeControllerManager: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeEtcd: { enabled: false }
+kubeProxy: { enabled: false }
+
+alertmanager: { enabled: false }
+
+prometheus:
+  prometheusSpec:
+    # Scrape ServiceMonitors from every namespace, not just ones carrying the
+    # release label -- the vLLM and Envoy monitors live in `inference`.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    retention: 15d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 20Gi
+    # Prometheus and vLLM are both memory-hungry on a 32GB node. Capped so a
+    # metrics spike cannot starve the thing being measured.
+    resources:
+      requests: { cpu: 200m, memory: 1Gi }
+      limits: { memory: 3Gi }
+
+grafana:
+  # ClusterIP, reached with `make dash` (kubectl port-forward) through the same
+  # SSH tunnel that carries the API server.
+  service:
+    type: ClusterIP
+  persistence:
+    enabled: true
+    size: 2Gi
+  defaultDashboardsEnabled: true

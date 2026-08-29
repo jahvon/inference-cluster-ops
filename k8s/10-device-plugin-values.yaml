@@ -1,0 +1,40 @@
+# nvidia-device-plugin helm values.
+#
+# The L4 has no Multi-Instance GPU (MIG) support, so time-slicing is the only
+# way to put more than one pod on the GPU. It advertises nvidia.com/gpu: N
+# and lets N pods schedule.
+#
+# What it does NOT give you is memory or fault isolation -- the pods share one
+# address space and can OOM each other. That is why every vLLM pod is passed an
+# explicit 1/N of the total VRAM budget (see bootstrap.sh).
+config:
+  map:
+    default: |-
+      version: v1
+      sharing:
+        timeSlicing:
+          resources:
+            - name: nvidia.com/gpu
+              replicas: ${GPU_TIMESLICE_REPLICAS}
+
+# GPU Feature Discovery is off -- it exists to label nodes for a mixed cluster,
+# and every node (single node cluster) here has the GPU.
+gfd:
+  enabled: false
+
+# ...but the chart's OWN default affinity requires one of the labels GFD or NFD
+# would have written:
+#
+#   feature.node.kubernetes.io/pci-10de.present=true
+#   feature.node.kubernetes.io/cpu-model.vendor_id=NVIDIA
+#   nvidia.com/gpu.present=true
+#
+# With neither component installed no node matches, the DaemonSet sits at
+# desiredNumberScheduled: 0, no plugin pod ever runs, and the node advertises
+# zero nvidia.com/gpu -- which surfaces as vLLM pods Pending on "Insufficient
+# nvidia.com/gpu" with a perfectly healthy driver underneath.
+#
+# Clearing the affinity is correct HERE because this is a single node that is a
+# GPU node by construction. On a mixed cluster, enable gfd instead and let the
+# labels do their job.
+affinity: null

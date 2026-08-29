@@ -1,0 +1,151 @@
+# yaml-language-server: $schema=https://flowexec.io/schemas/flowfile_schema.json
+visibility: public
+tags: [cluster, gpu, cost]
+description: Node lifecycle. `start`/`stop` are the day-to-day pair; `destroy` is final.
+
+executables:
+  - verb: provision
+    name: cluster
+    aliases: [create]
+    description: |
+      Create everything: VPC, SSH firewall, service account, disks, the GPU node,
+      k3s on it, and the inference workload.
+
+      First boot installs the NVIDIA driver and k3s, pulls a multi-GB container
+      and downloads model weights, so expect several minutes. Later boots restore
+      the whole cluster from the data disk and take ~1-2 minutes.
+    serial:
+      dir: //
+      execs:
+        - ref: check quota
+        - name: provision cluster
+          cmd: make provision
+        - name: what now
+          cmd: |
+            echo ""
+            echo "  flow show status    is it serving, and what is it costing"
+            echo "  flow test chat      say something to it"
+            echo ""
+
+  - verb: start
+    name: cluster
+    aliases: [up]
+    description: |
+      Boot the node and wait until vLLM is serving.
+
+      Nothing needs redeploying afterwards: k3s keeps its state on the data disk,
+      so every workload comes back on its own.
+    exec:
+      dir: //
+      params:
+        - envKey: SPOT
+          prompt: "Spot GPU? true/false (blank keeps current)"
+      cmd: make up SPOT="$SPOT"
+
+  - verb: stop
+    name: cluster
+    aliases: [down]
+    description: |
+      Stop the node. This is the main cost lever.
+
+      Compute billing stops; disks keep costing ~$16/mo. Weights, cluster state
+      and collected metrics are all preserved, so the next start skips the
+      download and picks up where it left off -- with a gap in the Grafana
+      history for the downtime, which is correct rather than a bug.
+    exec:
+      dir: //
+      cmd: make down
+
+
+  - verb: destroy
+    name: cluster
+    aliases: [teardown, nuke]
+    description: |
+      Destroy everything, INCLUDING the data disk -- weights, k3s cluster state,
+      rollout history, and every metric collected so far.
+
+      For "done with this project", not "done for today" -- use `stop cluster` for
+      that. Requires typing 'destroy' to confirm.
+    exec:
+      dir: //
+      cmd: make destroy
+
+  - verb: show
+    name: status
+    aliases: [st]
+    description: |
+      Is it on, is it spot, does the cluster see the GPU, is the model serving,
+      and what is it costing.
+
+      The number to look at first is GPU capacity: it should read the number of
+      time slices you configured. If it reads 0, the device plugin cannot see the
+      GPU and nothing will schedule -- the dashboard says so explicitly.
+    serial:
+      dir: //
+      execs:
+        - name: gather
+          cmd: make status > .status.json
+        - ref: generate status
+
+  # Internal: the presentation half of `show status`. The shell script gathers
+  # facts and emits JSON; this is the only place they are formatted, so the two
+  # cannot drift.
+  - verb: generate
+    name: status
+    visibility: internal
+    render:
+      dir: //
+      templateFile: docs/status.md
+      templateDataFile: .status.json
+
+  - verb: show
+    name: plan
+    aliases: [diff]
+    description: |
+      Preview infrastructure changes. Inherits the current on/off state, so it
+      never proposes starting a stopped node.
+
+      Model and replica changes will NOT appear here -- those live in
+      k8s/config.env and apply with `deploy workloads`.
+    exec:
+      dir: //
+      cmd: make plan
+
+  - verb: update
+    name: cluster
+    aliases: [apply, sync]
+    description: |
+      Apply INFRASTRUCTURE changes -- the counterpart to `show plan`, and what you
+      run after editing terraform.tfvars.
+
+      The common case is `allowed_ssh_cidr`: it is the only source the firewall
+      admits on port 22, so moving networks locks you out until this runs. Get the
+      new value from `show ip`.
+
+      This does not touch the workload. Model and replica changes are
+      `deploy workloads`, and need no terraform at all.
+
+      Inherits the current on/off state, so it never starts a stopped node.
+    exec:
+      dir: //
+      cmd: make apply
+
+  - verb: show
+    name: outputs
+    aliases: [out]
+    description: All terraform outputs -- address, machine type, cost estimates.
+    exec:
+      dir: //
+      cmd: make outputs
+
+  - verb: show
+    name: ip
+    aliases: [my-ip, whoami]
+    description: |
+      Print your public address in the form allowed_ssh_cidr wants.
+
+      Port 22 from this address is the only thing the firewall admits, so if SSH
+      starts timing out after you change networks, this is why.
+    exec:
+      dir: //
+      cmd: make my-ip

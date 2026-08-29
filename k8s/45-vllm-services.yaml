@@ -1,0 +1,46 @@
+# Three Services, three different jobs.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-headless
+  namespace: inference
+  labels: { app: vllm }
+spec:
+  # Envoy's upstream. Headless so DNS returns every pod IP and Envoy balances
+  # across pods itself -- see the STRICT_DNS cluster in 20-envoy.yaml.
+  clusterIP: None
+  selector: { app: vllm }
+  ports:
+    - { name: http, port: 8000, targetPort: 8000 }
+---
+# Metrics separation ONLY -- no traffic flows through either of these. Argo owns
+# their selectors, adding rollouts-pod-template-hash to point each at the right
+# ReplicaSet. That is the only reason it is possible to compare a canary's latency
+# against the stable version's.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-stable
+  namespace: inference
+  labels:
+    app: vllm
+    monitor: "true"
+    role: stable
+spec:
+  selector: { app: vllm }
+  ports:
+    - { name: http, port: 8000, targetPort: 8000 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-canary
+  namespace: inference
+  labels:
+    app: vllm
+    monitor: "true"
+    role: canary
+spec:
+  selector: { app: vllm }
+  ports:
+    - { name: http, port: 8000, targetPort: 8000 }

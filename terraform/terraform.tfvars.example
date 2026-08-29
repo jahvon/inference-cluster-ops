@@ -1,0 +1,23 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+
+project_id = "my-gcp-project"
+
+# The ONLY source allowed to reach port 22. Run `make my-ip` to get the value.
+# Re-run and re-apply if your address changes.
+allowed_ssh_cidr = "203.0.113.4/32"
+
+# Must have L4 capacity and quota.
+region = "us-central1"
+zone   = "us-central1-a"
+
+# Spot by default. Overridable per-command: `make up SPOT=false`.
+use_spot = true
+
+# The private half of this is what the Makefile's SSH_KEY points at.
+# ssh_user            = "ops"
+# ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+
+# The data disk holds weights, k3s state, container images and the Prometheus
+# TSDB, and is most of your idle cost -- it bills whether the VM runs or not.
+boot_disk_gb = 60
+data_disk_gb = 100

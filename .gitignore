@@ -1,0 +1,32 @@
+# Terraform state holds resource IDs and should not be committed. State is local
+# by design here (single user, single node); see README for the GCS migration.
+terraform/.terraform/
+# .terraform.lock.hcl IS committed: it pins provider versions across machines.
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Real config -- terraform.tfvars.example is the committed template.
+terraform/terraform.tfvars
+*.auto.tfvars
+
+# Cluster credential, fetched from the node by `make kubeconfig`.
+kubeconfig
+
+# Per-machine workload overrides. k8s/config.env IS committed -- it is the
+# source of truth; this is only for local deviations from it.
+k8s/config.env.local
+
+# Output of `make render`. Generated, never edited by hand.
+k8s/rendered/
+
+# Data file behind `flow show status`. Regenerated on every run.
+.status.json
+
+# The node's external address is ephemeral, so host keys churn. Kept out of
+# ~/.ssh/known_hosts and out of git.
+.ssh_known_hosts
+
+.DS_Store

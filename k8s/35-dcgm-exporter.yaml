@@ -1,0 +1,46 @@
+# NVIDIA DCGM exporter: per-GPU utilization, memory, temperature and power.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: inference
+  labels: { app: dcgm-exporter }
+spec:
+  selector:
+    matchLabels: { app: dcgm-exporter }
+  template:
+    metadata:
+      labels: { app: dcgm-exporter }
+    spec:
+      containers:
+        - name: dcgm-exporter
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:4.5.2-4.8.1-ubuntu22.04
+          ports:
+            - { name: metrics, containerPort: 9400 }
+          env:
+            # Deliberately NOT a `resources.limits: nvidia.com/gpu` request. Asking
+            # the device plugin for a GPU would consume one of the time slices and
+            # cost you a vLLM replica. The nvidia runtime is already the cluster
+            # default, so making the devices visible is all that is needed.
+            - { name: NVIDIA_VISIBLE_DEVICES, value: "all" }
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: "utility" }
+          securityContext:
+            runAsNonRoot: false
+            capabilities:
+              add: ["SYS_ADMIN"]
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dcgm-exporter
+  namespace: inference
+  labels: { app: dcgm-exporter }
+spec:
+  selector: { app: dcgm-exporter }
+  ports:
+    - name: metrics
+      port: 9400
+      targetPort: 9400

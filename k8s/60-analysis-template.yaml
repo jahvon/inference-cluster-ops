@@ -1,0 +1,31 @@
+# Gate the canary on measured latency instead of a fixed pause.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: vllm-latency
+  namespace: inference
+spec:
+  metrics:
+    - name: p95-ttft
+      # A pod that has served nothing produces no histogram. Wait before the
+      # first query rather than pausing in the Rollout's steps -- this keeps the
+      # delay next to the thing that needs it.
+      initialDelay: 2m
+      interval: 30s
+      count: 4
+      # The len(result) == 0 guard is not optional. histogram_quantile over an
+      # empty vector returns an empty vector, and a bare result[0] then raises an
+      # index error that counts toward failureLimit -- aborting the rollout before
+      # the canary has served a single request. The same thing happens whenever
+      # the canary is briefly between ReplicaSets.
+      successCondition: "len(result) == 0 || result[0] < ${TTFT_P95_THRESHOLD}"
+      failureLimit: 2
+      # Prometheus being briefly unreachable is not a failing canary.
+      consecutiveErrorLimit: 3
+      provider:
+        prometheus:
+          address: ${PROM_URL}
+          query: |
+            histogram_quantile(0.95,
+              sum(rate(vllm:time_to_first_token_seconds_bucket{role="canary"}[2m]))
+              by (le))

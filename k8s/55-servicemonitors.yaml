@@ -1,0 +1,55 @@
+# vLLM. Selects `monitor: "true"`, which vllm-stable and vllm-canary carry
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm
+  namespace: inference
+  labels: { app: vllm }
+spec:
+  namespaceSelector:
+    matchNames: [inference]
+  selector:
+    matchLabels:
+      app: vllm
+      monitor: "true"
+  # targetLabels copies the Service's `role` label onto every series, which is what
+  # the AnalysisTemplate keys on to compare canary against stable.
+  targetLabels: [role]
+  endpoints:
+    - port: http
+      # vLLM serves metrics on the same port as the API.
+      path: /metrics
+      interval: 15s
+---
+# Envoy's view of the fleet: request rate, response codes, and upstream latency as
+# the client experiences it -- none of which vLLM's own metrics can show.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: envoy
+  namespace: inference
+  labels: { app: envoy }
+spec:
+  namespaceSelector:
+    matchNames: [inference]
+  selector:
+    matchLabels: { app: envoy }
+  endpoints:
+    - port: metrics
+      path: /stats/prometheus
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: dcgm-exporter
+  namespace: inference
+  labels: { app: dcgm-exporter }
+spec:
+  namespaceSelector:
+    matchNames: [inference]
+  selector:
+    matchLabels: { app: dcgm-exporter }
+  endpoints:
+    - port: metrics
+      interval: 15s

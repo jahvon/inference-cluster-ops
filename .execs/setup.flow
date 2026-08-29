@@ -1,0 +1,71 @@
+# yaml-language-server: $schema=https://flowexec.io/schemas/flowfile_schema.json
+tags: [setup, gcp]
+description: First-run bootstrap. Start here on a fresh machine or project.
+
+executables:
+  - verb: setup
+    name: cluster
+    aliases: [bootstrap]
+    description: |
+      One-time bootstrap: verify quota and tooling, then init terraform.
+
+      Run this before anything else. GCP gives new projects ZERO GPU quota, and
+      spot and on-demand draw on separate quotas -- this catches that up front
+      instead of letting it surface as a terraform failure minutes in.
+
+      It also checks the two things the SSH-only access model needs: an SSH key,
+      and an `allowed_ssh_cidr` that actually matches where you are.
+    serial:
+      dir: //
+      execs:
+        - ref: check quota
+        - name: terraform init
+          cmd: make init
+        - name: next steps
+          cmd: |
+            echo ""
+            echo "Bootstrap complete. Next:"
+            echo "  flow provision cluster   # create the node (first boot is slow)"
+            echo ""
+            echo "After that, workload changes are 'flow deploy workloads' -- no reboot."
+            echo ""
+
+  - verb: check
+    name: quota
+    aliases: [preflight, quotas]
+    description: |
+      Check auth, APIs, GPU quota, SSH access and local tooling, without changing
+      anything.
+
+      Reports spot and on-demand quota separately, since having one does not imply
+      the other. Also checks that kubectl, helm and envsubst are installed
+      locally -- the deploy runs them here, against the node's API server through
+      the tunnel, not on the node.
+    exec:
+      dir: //
+      cmd: make preflight
+
+
+
+  - verb: init
+    name: terraform
+    aliases: [tf-init]
+    description: |
+      Run `terraform init`. Already part of `setup cluster`, so this is for the
+      cases that come later: a provider version bump, a change to versions.tf, or
+      a fresh clone of an already-configured project.
+
+      Fails with a pointer to the example file if terraform.tfvars is missing.
+    exec:
+      dir: //
+      cmd: make init
+
+  - verb: validate
+    name: terraform
+    aliases: [tf, fmt]
+    description: |
+      Check terraform formatting and validity, and render the k8s manifests
+      offline to confirm nothing is left unsubstituted.
+    exec:
+      dir: //
+      cmd: make validate

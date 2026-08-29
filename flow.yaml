@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://flowexec.io/schemas/workspace_schema.json
+displayName: Inference Cluster Ops
+description: |
+  GPU inference cluster on GCP -- vLLM serving an OpenAI-compatible API from a
+  single G2 (NVIDIA L4) instance.
+descriptionFile: README.md
+tags: [inference, gcp, terraform, vllm]
+verbAliases:
+  start: [boot]
+  stop: [halt]
