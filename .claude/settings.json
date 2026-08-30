@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "permissions": {
+    "allow": [
+      "Bash(flow:*)",
+      "mcp__flow__get_info",
+      "mcp__flow__list_workspaces",
+      "mcp__flow__get_workspace",
+      "mcp__flow__get_workspace_config",
+      "mcp__flow__list_executables",
+      "mcp__flow__get_executable",
+      "mcp__flow__get_execution_logs",
+      "mcp__flow__sync_executables"
+    ]
+  },
+  "env": {
+    "FLOW_RUN_CLIENT": "claude-code",
+    "FLOW_RUN_SESSION": "${CLAUDE_CODE_SESSION_ID}"
+  }
+}
