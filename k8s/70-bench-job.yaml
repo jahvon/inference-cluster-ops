@@ -1,0 +1,94 @@
+# Calibration load. Runs kubernetes-sigs/inference-perf as a Job: sends
+# BENCH_NUM_PROMPTS requests at a fixed concurrency, reports, and exits.
+#
+# Same tool as the sustained generator in 72-load-generator.yaml, deliberately. Two
+# harnesses would measure this cluster with two different definitions of TTFT and
+# neither number would be comparable to the other.
+#
+# `load.type: concurrent` rather than a request rate, because calibration wants a
+# closed loop: hold N requests in flight and see what the server gives back. A fixed
+# arrival rate is an open loop that queues without bound past capacity, which ends up
+# measuring the queue rather than the server.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-bench-config
+  namespace: inference
+  labels: { app: vllm-bench }
+data:
+  config.yml: |
+    api:
+      type: completion
+      streaming: true
+      headers:
+        x-tenant: bench
+    server:
+      type: vllm
+      model_name: ${SERVED_MODEL_NAME}
+      base_url: http://envoy.inference.svc.cluster.local:8000
+      ignore_eos: true
+    load:
+      type: concurrent
+      stages:
+        - concurrency_level: ${BENCH_CONCURRENCY}
+          num_requests: ${BENCH_NUM_PROMPTS}
+      num_workers: 2
+      worker_max_concurrency: ${BENCH_CONCURRENCY}
+    data:
+      type: synthetic
+      input_distribution:
+        min: ${BENCH_INPUT_LEN}
+        max: ${BENCH_INPUT_LEN}
+        mean: ${BENCH_INPUT_LEN}
+        std_dev: 0
+        total_count: ${BENCH_NUM_PROMPTS}
+      output_distribution:
+        min: ${BENCH_OUTPUT_LEN}
+        max: ${BENCH_OUTPUT_LEN}
+        mean: ${BENCH_OUTPUT_LEN}
+        std_dev: 0
+        total_count: ${BENCH_NUM_PROMPTS}
+    tokenizer:
+      pretrained_model_name_or_path: ${MODEL_ID}
+    metrics:
+      type: default
+    report:
+      request_lifecycle:
+        summary: true
+        per_stage: true
+        per_request: false
+        percentiles: [50, 90, 95, 99]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vllm-bench
+  namespace: inference
+  labels: { app: vllm-bench }
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: { app: vllm-bench }
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: inference-perf
+          image: ${INFERENCE_PERF_IMAGE}
+          command: ["inference-perf"]
+          args: ["--config_file", "/etc/config/config.yml"]
+          env:
+            - { name: HF_HOME, value: /root/.cache/huggingface }
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { memory: 4Gi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/config, readOnly: true }
+            - { name: hf-cache, mountPath: /root/.cache/huggingface }
+      volumes:
+        - name: config
+          configMap: { name: vllm-bench-config }
+        - name: hf-cache
+          hostPath:
+            path: ${HF_CACHE_HOSTPATH}
+            type: DirectoryOrCreate

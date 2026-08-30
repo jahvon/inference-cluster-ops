@@ -30,3 +30,7 @@ k8s/rendered/
 .ssh_known_hosts
 
 .DS_Store
+
+# Generated reports (flow show slo / flow benchmark baseline)
+.slo.json
+.bench.json

@@ -28,6 +28,21 @@ data:
                       virtual_hosts:
                         - name: vllm
                           domains: ["*"]
+                          # Per-tenant metrics, keyed off an `x-tenant` request header.
+                          # Traffic without a match falls into the `other` virtual cluster.
+                          virtual_clusters:
+                            - name: bench
+                              headers:
+                                - name: x-tenant
+                                  string_match: { exact: bench }
+                            - name: interactive
+                              headers:
+                                - name: x-tenant
+                                  string_match: { exact: interactive }
+                            - name: batch
+                              headers:
+                                - name: x-tenant
+                                  string_match: { exact: batch }
                           routes:
                             - match: { prefix: "/" }
                               route:
@@ -123,6 +138,20 @@ data:
                   - endpoint:
                       address:
                         socket_address: { address: 127.0.0.1, port_value: 9901 }
+
+    # Envoy's default histogram buckets are tuned for microservice hops, not token
+    # generation: above 5s they jump 10s -> 30s -> 60s -> 300s. Every LLM request
+    # lands in a handful of buckets and histogram_quantile then interpolates p95
+    # and p99 across a 20-second-wide bucket.
+    #
+    # These buckets are in MILLISECONDS and are spaced where this workload actually
+    # sits. Revisit them if the model or MAX_MODEL_LEN changes substantially.
+    stats_config:
+      histogram_bucket_settings:
+        - match: { prefix: "cluster.vllm.upstream_rq_time" }
+          buckets: [50, 100, 250, 500, 1000, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 30000, 60000, 120000]
+        - match: { prefix: "vhost.vllm.vcluster." }
+          buckets: [50, 100, 250, 500, 1000, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 30000, 60000, 120000]
 
     # Loopback only: the admin interface can drain and shut down the proxy.
     admin:

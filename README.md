@@ -90,17 +90,57 @@ flow watch gpu
 ## Observability
 
 ```sh
-flow open dashboard   # Grafana on localhost:3000
+flow open dashboard   # Grafana on localhost:3000 -- two dashboards, see below
+flow open metrics     # Prometheus on localhost:9090
+flow benchmark baseline  # one-shot calibration (inference-perf, as a Job)
+flow start load          # sustained two-tenant traffic (inference-perf)
+flow stop load
+flow show slo         # violations, availability and recovery times
 flow show status      # GPU slices, rollout phase, burn rate
 flow show pods
 ```
 
-Prometheus scrapes vLLM, Envoy and dcgm-exporter. The series worth building on:
+Prometheus scrapes vLLM, Envoy, dcgm-exporter and the Argo Rollouts controller.
+Two dashboards ship as code in [k8s/52-dashboards.yaml](k8s/52-dashboards.yaml):
+
+- **vLLM Serving SLIs** — throughput, latency percentiles, saturation, GPU, errors,
+  per-tenant traffic.
+- **vLLM Rollout & SLO** — SLO state over time, canary vs stable, recovery.
+
+Everything is computed from recording rules in [k8s/50-prometheus-rules.yaml](k8s/50-prometheus-rules.yaml)
+(prefixed `sli:` and `slo:`), so a query lives in one place rather than in every
+panel. `sli:vllm:healthy` is the composite objective — the series that makes
+"violations" and "recovery time" measurable.
+
+The underlying series worth knowing:
 
 | Metric | Why |
 | --- | --- |
-| `vllm:time_to_first_token_seconds` | The latency users feel. The canary gates on this. |
+| `vllm:time_to_first_token_seconds` | The latency users feel. The canary currently gates on this. |
+| `vllm:request_time_per_output_token_seconds` | TPOT — per-request mean decode cost per token |
+| `vllm:inter_token_latency_seconds` | ITL — the gap between decode steps. Spikes under contention where TPOT stays smooth |
 | `vllm:num_requests_running` / `_waiting` | Queue depth — shows when replicas saturate |
-| `vllm:gpu_cache_usage_perc` | KV cache pressure — the real ceiling on replica count |
-| `DCGM_FI_DEV_GPU_UTIL`, `DCGM_FI_DEV_FB_USED` | Whether time-slicing is actually sharing |
+| `vllm:kv_cache_usage_perc` | KV cache pressure — the real ceiling on replica count |
+| `DCGM_FI_PROF_GR_ENGINE_ACTIVE` | Real GPU utilization |
 | `envoy_cluster_upstream_rq_time_bucket` | End-to-end latency as the client sees it |
+| `envoy_vhost_vcluster_upstream_rq` | Per-tenant traffic, keyed on the `x-tenant` header |
+
+### Generating traffic
+
+Both run the same harness, [kubernetes-sigs/inference-perf](https://github.com/kubernetes-sigs/inference-perf) —
+one as a Job, one as Deployments. What differs is shape and what you keep:
+
+| | what it is | output |
+| --- | --- | --- |
+| `flow benchmark baseline` | one-shot; sends N prompts and exits | a report — percentiles and SLO attainment |
+| `flow start load` | sustained; runs until stopped | traffic. You read the result in Grafana |
+
+The sustained one runs [kubernetes-sigs/inference-perf](https://github.com/kubernetes-sigs/inference-perf)
+as **two tenants at once**, shaped to contend: `batch` sends long prompts whose
+prefills occupy the GPU, `interactive` sends short ones and is the tenant you watch
+suffer for it.
+
+Defaults sit at roughly half of measured capacity so the cluster stays healthy while
+load runs. That is deliberate: a baseline that already violates the SLO leaves a
+rollout or a preemption nothing to show. [k8s/config.env](k8s/config.env) documents how to crank it
+into deliberate violation.

@@ -1,0 +1,230 @@
+# Recording rules: the SLIs, computed once here instead of being retyped into every
+# dashboard panel, the canary gate, and the SLO report.
+#
+# Metric names below were read off a live vllm/vllm-openai:v0.26.0 endpoint, not
+# copied from documentation. Two traps worth knowing if you edit them:
+#
+#   - It is `vllm:kv_cache_usage_perc`. The V0 name `vllm:gpu_cache_usage_perc` does
+#     not exist on the V1 engine and silently returns nothing.
+#   - vLLM exposes TWO per-output-token histograms and they measure different things.
+#     `inter_token_latency_seconds` is the gap between consecutive decode steps -- the
+#     stutter a streaming reader sees. `request_time_per_output_token_seconds` is a
+#     per-request mean over the whole generation. TPOT below is the second one;
+#     the first is recorded separately as ITL.
+#
+# Envoy naming is its own trap: the request counter is `envoy_cluster_upstream_rq`
+# with NO `_total` suffix, unlike every vLLM counter.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: inference-sli
+  namespace: inference
+  labels:
+    app: vllm
+    # Harmless when ruleSelectorNilUsesHelmValues is false, and the thing that makes
+    # this work if someone later removes that setting.
+    release: kps
+spec:
+  groups:
+    # 15s to match the ServiceMonitor scrape interval. Rules inside a group evaluate
+    # in order, so the derived rules at the end of the file can safely read the ones
+    # recorded above them.
+    - name: inference-sli-latency
+      interval: 15s
+      rules:
+        - record: sli:vllm:ttft_seconds:p50
+          expr: histogram_quantile(0.50, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))
+        - record: sli:vllm:ttft_seconds:p95
+          expr: histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))
+        - record: sli:vllm:ttft_seconds:p99
+          expr: histogram_quantile(0.99, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))
+
+        # TPOT: per-request mean decode time per output token.
+        - record: sli:vllm:tpot_seconds:p50
+          expr: histogram_quantile(0.50, sum by (le) (rate(vllm:request_time_per_output_token_seconds_bucket[5m])))
+        - record: sli:vllm:tpot_seconds:p95
+          expr: histogram_quantile(0.95, sum by (le) (rate(vllm:request_time_per_output_token_seconds_bucket[5m])))
+        - record: sli:vllm:tpot_seconds:p99
+          expr: histogram_quantile(0.99, sum by (le) (rate(vllm:request_time_per_output_token_seconds_bucket[5m])))
+
+        # ITL: gap between consecutive decode steps. Diverges from TPOT under
+        # contention -- when the two vLLM pods fight for GPU slices, ITL spikes
+        # while TPOT stays smooth, because TPOT averages the spikes away.
+        - record: sli:vllm:itl_seconds:p95
+          expr: histogram_quantile(0.95, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket[5m])))
+        - record: sli:vllm:itl_seconds:p99
+          expr: histogram_quantile(0.99, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket[5m])))
+
+        - record: sli:vllm:e2e_seconds:p50
+          expr: histogram_quantile(0.50, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))
+        - record: sli:vllm:e2e_seconds:p95
+          expr: histogram_quantile(0.95, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))
+        - record: sli:vllm:e2e_seconds:p99
+          expr: histogram_quantile(0.99, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))
+
+        # Queueing. p99 matters more than p95 here: queue time is bimodal -- near
+        # zero until the batch is full, then a cliff.
+        - record: sli:vllm:queue_seconds:p95
+          expr: histogram_quantile(0.95, sum by (le) (rate(vllm:request_queue_time_seconds_bucket[5m])))
+        - record: sli:vllm:queue_seconds:p99
+          expr: histogram_quantile(0.99, sum by (le) (rate(vllm:request_queue_time_seconds_bucket[5m])))
+
+        - record: sli:vllm:prefill_seconds:p95
+          expr: histogram_quantile(0.95, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket[5m])))
+        - record: sli:vllm:decode_seconds:p95
+          expr: histogram_quantile(0.95, sum by (le) (rate(vllm:request_decode_time_seconds_bucket[5m])))
+
+        # Split by canary/stable for the rollout view and the analysis gate. The
+        # `role` label reaches these series from the Service, via the vllm
+        # ServiceMonitor's `targetLabels: [role]` -- it is not on the pod.
+        - record: sli:vllm:ttft_seconds:p95:by_role
+          expr: histogram_quantile(0.95, sum by (le, role) (rate(vllm:time_to_first_token_seconds_bucket[5m])))
+        - record: sli:vllm:tpot_seconds:p95:by_role
+          expr: histogram_quantile(0.95, sum by (le, role) (rate(vllm:request_time_per_output_token_seconds_bucket[5m])))
+        - record: sli:vllm:e2e_seconds:p95:by_role
+          expr: histogram_quantile(0.95, sum by (le, role) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))
+
+        # Client-observed latency, in seconds. Envoy's histogram is in milliseconds;
+        # dividing here means no panel has to remember that.
+        - record: sli:envoy:e2e_seconds:p95
+          expr: histogram_quantile(0.95, sum by (le) (rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name="vllm"}[5m]))) / 1000
+        - record: sli:envoy:e2e_seconds:p99
+          expr: histogram_quantile(0.99, sum by (le) (rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name="vllm"}[5m]))) / 1000
+
+        # Per-tenant, from the Envoy virtual clusters. Requests, latency and errors
+        # only -- there is no per-tenant token count anywhere in this stack.
+        - record: sli:tenant:e2e_seconds:p95
+          expr: histogram_quantile(0.95, sum by (le, envoy_virtual_cluster) (rate(envoy_vhost_vcluster_upstream_rq_time_bucket{envoy_virtual_host="vllm"}[5m]))) / 1000
+        - record: sli:tenant:requests:rate5m
+          expr: sum by (envoy_virtual_cluster) (rate(envoy_vhost_vcluster_upstream_rq{envoy_virtual_host="vllm"}[5m]))
+
+    - name: inference-sli-throughput
+      interval: 15s
+      rules:
+        # A vLLM pod is scraped TWICE. vllm-stable and vllm-canary both carry
+        # `monitor: "true"`, and outside a rollout both Services select every pod -- Argo only
+        # makes their selectors diverge, by injecting the pod-template hash, while a rollout is
+        # in progress. So a plain sum() over any vLLM counter or gauge is exactly double the
+        # truth whenever nothing is rolling out.
+        #
+        # `avg by (pod, engine)` collapses the duplicate before the sum, and stays correct
+        # during a rollout too, where each pod legitimately appears under one role only.
+        #
+        # This does NOT affect the histogram quantiles above: doubling every bucket uniformly
+        # leaves the distribution -- and therefore the quantile -- unchanged. It only affects
+        # things being summed.
+        - record: sli:vllm:output_tokens:rate5m
+          expr: sum(avg by (pod, engine) (rate(vllm:generation_tokens_total[5m])))
+        - record: sli:vllm:prompt_tokens:rate5m
+          expr: sum(avg by (pod, engine) (rate(vllm:prompt_tokens_total[5m])))
+
+        # tokens/s/GPU. `or vector(1)` keeps this defined if dcgm-exporter is down --
+        # otherwise losing the GPU exporter would also blank out the throughput panel,
+        # which is exactly when you want to be looking at it.
+        - record: sli:vllm:output_tokens_per_gpu:rate5m
+          expr: sli:vllm:output_tokens:rate5m / scalar(count(DCGM_FI_DEV_FB_USED) or vector(1))
+
+        # tokens/s/user, read as "output tokens a single in-flight stream is getting".
+        # This is the per-stream decode rate, which is what a user actually perceives;
+        # it is NOT per-tenant. clamp_min keeps an idle cluster from dividing by zero.
+        - record: sli:vllm:output_tokens_per_stream:rate5m
+          expr: sli:vllm:output_tokens:rate5m / clamp_min(sum(avg by (pod, engine) (avg_over_time(vllm:num_requests_running[5m]))), 1)
+
+        - record: sli:vllm:requests:rate5m
+          expr: sum(avg by (pod, engine) (rate(vllm:request_success_total[5m])))
+
+        # Prefix cache hit ratio -- a large part of why TTFT varies between otherwise
+        # identical requests.
+        - record: sli:vllm:prefix_cache_hit_ratio
+          expr: |
+            (sum(avg by (pod, engine) (rate(vllm:prefix_cache_hits_total[5m]))) or vector(0))
+            /
+            clamp_min(sum(avg by (pod, engine) (rate(vllm:prefix_cache_queries_total[5m]))) or vector(0), 0.001)
+
+    - name: inference-sli-saturation
+      interval: 15s
+      rules:
+        - record: sli:vllm:requests_running
+          expr: sum(avg by (pod, engine) (vllm:num_requests_running))
+        - record: sli:vllm:requests_waiting
+          expr: sum(avg by (pod, engine) (vllm:num_requests_waiting))
+        - record: sli:vllm:kv_cache_usage:max
+          expr: max(vllm:kv_cache_usage_perc)
+        - record: sli:vllm:preemptions:rate5m
+          expr: sum(avg by (pod, engine) (rate(vllm:num_preemptions_total[5m]))) or vector(0)
+
+        # The honest GPU utilization signal under time-slicing. DCGM_FI_DEV_GPU_UTIL
+        # only says a kernel was resident, so with two pods sharing the L4 it pins
+        # near 100% regardless of real load. Absent unless the DCP profiling fields
+        # are available -- see k8s/35-dcgm-exporter.yaml.
+        - record: sli:gpu:engine_active
+          expr: avg(DCGM_FI_PROF_GR_ENGINE_ACTIVE)
+        - record: sli:gpu:tensor_active
+          expr: avg(DCGM_FI_PROF_PIPE_TENSOR_ACTIVE)
+        - record: sli:gpu:util_coarse
+          expr: avg(DCGM_FI_DEV_GPU_UTIL) / 100
+        - record: sli:gpu:memory_used_ratio
+          expr: sum(DCGM_FI_DEV_FB_USED) / clamp_min(sum(DCGM_FI_DEV_FB_USED) + sum(DCGM_FI_DEV_FB_FREE), 1)
+
+    - name: inference-slo
+      interval: 15s
+      rules:
+        # Error rate as the client sees it. Both sides carry `or vector(0)` so this
+        # reads 0 on an idle cluster rather than going absent -- an absent error rate
+        # would make `sli:vllm:healthy` disappear, and a disappearing health signal
+        # is indistinguishable from an unhealthy one on a graph.
+        - record: sli:envoy:error_ratio:rate5m
+          expr: |
+            (sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name="vllm",envoy_response_code_class="5"}[5m])) or vector(0))
+            /
+            clamp_min(sum(rate(envoy_cluster_upstream_rq{envoy_cluster_name="vllm"}[5m])) or vector(0), 0.001)
+
+        # vLLM's own view. Diverges from the Envoy ratio when requests fail before
+        # reaching a pod, or when Envoy's retries paper over a pod-level failure.
+        - record: sli:vllm:error_ratio:rate5m
+          expr: |
+            (sum(avg by (pod, engine) (rate(vllm:request_success_total{finished_reason="error"}[5m]))) or vector(0))
+            /
+            clamp_min(sli:vllm:requests:rate5m or vector(0), 0.001)
+
+        # The composite SLI: 1 when every objective holds, 0 when any is breached.
+        # This single series is what makes "SLO violations during a rollout" and
+        # "recovery time" computable at all -- scripts/slo-report.sh range-queries it
+        # and derives the violation windows from the transitions.
+        #
+        # An idle cluster is healthy: you cannot miss a latency objective with no
+        # requests in flight. Getting that right needs BOTH guards below.
+        #
+        # The `>= 0` is the subtle one, and omitting it inverts the metric. With no
+        # traffic in the rate window, histogram_quantile does not return nothing --
+        # it returns NaN, so the series is PRESENT with a NaN value. `or vector(1)`
+        # only fires on an absent series, so it would never trigger; and every
+        # comparison against NaN is false, making `NaN < bool threshold` evaluate to
+        # 0. The net effect is that a perfectly idle cluster reports as VIOLATING.
+        #
+        # `(x >= 0)` is a filter, not a comparison-to-bool: NaN fails it, the series
+        # drops out, and `or vector(1)` can then do its job.
+        - record: sli:vllm:healthy
+          expr: |
+            (((sli:vllm:ttft_seconds:p95 >= 0) < bool ${TTFT_P95_THRESHOLD}) or vector(1))
+            *
+            (((sli:vllm:tpot_seconds:p95 >= 0) < bool ${TPOT_P95_THRESHOLD}) or vector(1))
+            *
+            ((sli:envoy:error_ratio:rate5m < bool ${ERROR_RATIO_SLO}) or vector(1))
+
+        - record: sli:vllm:violating
+          expr: 1 - sli:vllm:healthy
+
+        # The objectives themselves, published as series.
+        #
+        # This exists so the dashboards can draw the SLO as a reference line without
+        # hardcoding the number. Grafana dashboard JSON is applied raw -- it is not
+        # rendered through envsubst -- so a threshold written into a panel would be a
+        # second copy of a value that lives in config.env, and the two would drift the
+        # first time someone re-baselined one and not the other.
+        - record: slo:objective:ttft_seconds
+          expr: vector(${TTFT_P95_THRESHOLD})
+        - record: slo:objective:tpot_seconds
+          expr: vector(${TPOT_P95_THRESHOLD})
+        - record: slo:objective:error_ratio
+          expr: vector(${ERROR_RATIO_SLO})

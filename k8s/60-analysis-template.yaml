@@ -1,4 +1,17 @@
-# Gate the canary on measured latency instead of a fixed pause.
+# Gate the canary on measured behavior.
+#
+# ---------------------------------------------------------------------------
+# Every query ends in `>= 0`, and that is load-bearing.
+#
+# With no traffic in the window, histogram_quantile does not return an empty vector
+# -- it returns NaN. `len(result) == 0` therefore does NOT catch the idle case: the
+# result has one element whose value is NaN, and `NaN < threshold` is false, so the
+# gate records a failure. Two of those and a perfectly healthy rollout is aborted for
+# the sole reason that nobody sent it any traffic.
+#
+# `>= 0` is a filter: NaN fails it, the series drops out, the result really is empty,
+# and the len() guard does its job.
+# ---------------------------------------------------------------------------
 apiVersion: argoproj.io/v1alpha1
 kind: AnalysisTemplate
 metadata:
@@ -8,19 +21,12 @@ spec:
   metrics:
     - name: p95-ttft
       # A pod that has served nothing produces no histogram. Wait before the
-      # first query rather than pausing in the Rollout's steps -- this keeps the
-      # delay next to the thing that needs it.
+      # first query.
       initialDelay: 2m
       interval: 30s
       count: 4
-      # The len(result) == 0 guard is not optional. histogram_quantile over an
-      # empty vector returns an empty vector, and a bare result[0] then raises an
-      # index error that counts toward failureLimit -- aborting the rollout before
-      # the canary has served a single request. The same thing happens whenever
-      # the canary is briefly between ReplicaSets.
       successCondition: "len(result) == 0 || result[0] < ${TTFT_P95_THRESHOLD}"
       failureLimit: 2
-      # Prometheus being briefly unreachable is not a failing canary.
       consecutiveErrorLimit: 3
       provider:
         prometheus:
@@ -28,4 +34,41 @@ spec:
           query: |
             histogram_quantile(0.95,
               sum(rate(vllm:time_to_first_token_seconds_bucket{role="canary"}[2m]))
-              by (le))
+              by (le)) >= 0
+
+    # Decode speed. TTFT can look perfect while generation crawls -- a change that
+    # slows per-token decode shows up here and nowhere else in this template.
+    - name: p95-tpot
+      initialDelay: 2m
+      interval: 30s
+      count: 4
+      successCondition: "len(result) == 0 || result[0] < ${TPOT_P95_THRESHOLD}"
+      failureLimit: 2
+      consecutiveErrorLimit: 3
+      provider:
+        prometheus:
+          address: ${PROM_URL}
+          query: |
+            histogram_quantile(0.95,
+              sum(rate(vllm:request_time_per_output_token_seconds_bucket{role="canary"}[2m]))
+              by (le)) >= 0
+
+    # Correctness, not speed: a canary that is fast because it is failing fast would
+    # sail through both latency gates above.
+    #
+    # clamp_min keeps the ratio defined when the canary has served nothing; the
+    # numerator is then 0, so the result is a clean 0 rather than a divide by zero.
+    - name: error-ratio
+      initialDelay: 2m
+      interval: 30s
+      count: 4
+      successCondition: "len(result) == 0 || result[0] < ${ERROR_RATIO_SLO}"
+      failureLimit: 2
+      consecutiveErrorLimit: 3
+      provider:
+        prometheus:
+          address: ${PROM_URL}
+          query: |
+            (sum(rate(vllm:request_success_total{role="canary",finished_reason="error"}[2m])) or vector(0))
+            /
+            clamp_min(sum(rate(vllm:request_success_total{role="canary"}[2m])) or vector(0), 0.001)

@@ -52,9 +52,14 @@ executables:
       and collected metrics are all preserved, so the next start skips the
       download and picks up where it left off -- with a gap in the Grafana
       history for the downtime, which is correct rather than a bug.
-    exec:
+
+      Closes the Grafana and Prometheus port-forwards afterwards.
+    serial:
       dir: //
-      cmd: make down
+      execs:
+        - name: stop
+          cmd: make down
+        - ref: disconnect forwards
 
 
   - verb: destroy
@@ -66,9 +71,14 @@ executables:
 
       For "done with this project", not "done for today" -- use `stop cluster` for
       that. Requires typing 'destroy' to confirm.
-    exec:
+
+      Closes the Grafana and Prometheus port-forwards afterwards.
+    serial:
       dir: //
-      cmd: make destroy
+      execs:
+        - name: destroy
+          cmd: make destroy
+        - ref: disconnect forwards
 
   - verb: show
     name: status

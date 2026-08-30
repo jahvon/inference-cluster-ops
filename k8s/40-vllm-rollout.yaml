@@ -47,18 +47,9 @@ spec:
         # pod is terminated first, so the fleet never grows.
         - setWeight: ${CANARY_WEIGHT}
 
-        # No separate warm-up pause -- the analysis carries its own initialDelay,
-        # which keeps "how long before this measurement is meaningful" attached
-        # to the measurement instead of floating as a step above it.
         - analysis:
             templates:
               - templateName: vllm-latency
-
-        # Indefinite. The analysis above is the automated gate; this is the
-        # human one, and it stays until TTFT_P95_THRESHOLD has been set from a
-        # measured baseline rather than a guess. Once it has, delete this step
-        # and a passing analysis promotes on its own.
-        - pause: {}
 
   template:
     metadata:

@@ -1,4 +1,3 @@
-# vLLM. Selects `monitor: "true"`, which vllm-stable and vllm-canary carry
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -17,12 +16,9 @@ spec:
   targetLabels: [role]
   endpoints:
     - port: http
-      # vLLM serves metrics on the same port as the API.
       path: /metrics
       interval: 15s
 ---
-# Envoy's view of the fleet: request rate, response codes, and upstream latency as
-# the client experiences it -- none of which vLLM's own metrics can show.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -52,4 +48,21 @@ spec:
     matchLabels: { app: dcgm-exporter }
   endpoints:
     - port: metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: argo-rollouts
+  namespace: inference
+  labels: { app: argo-rollouts }
+spec:
+  namespaceSelector:
+    matchNames: [argo-rollouts]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argo-rollouts
+  endpoints:
+    - port: metrics
+      path: /metrics
       interval: 15s

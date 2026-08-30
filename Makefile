@@ -30,6 +30,7 @@ VLLM_REPLICAS ?=
 
 API_PORT ?= 8000
 GRAFANA_PORT ?= 3000
+PROM_PORT ?= 9090
 
 TF_OVERRIDES :=
 ifneq ($(strip $(SPOT)),)
@@ -240,6 +241,26 @@ kubeconfig: _need-node ## Fetch the cluster credential to ./kubeconfig
 status: ## Instance state, GPU slices, rollout and burn rate, as JSON
 	@bash scripts/status.sh "$(PROJECT)" "$(ZONE)" "$(INSTANCE)"
 
+.PHONY: slo
+slo: ## Latency percentiles, SLO violations and recovery times, as JSON
+	@bash scripts/slo-report.sh
+
+.PHONY: calibrate
+calibrate: ## One-shot calibration run: measure the latency/throughput baseline
+	@bash scripts/calibrate.sh
+
+.PHONY: load-start
+load-start: ## Start sustained multi-tenant load (inference-perf)
+	@bash scripts/load.sh start
+
+.PHONY: load-stop
+load-stop: ## Stop the sustained load generators
+	@bash scripts/load.sh stop
+
+.PHONY: load-status
+load-status: ## Are the load generators running
+	@bash scripts/load.sh status || true
+
 .PHONY: wait
 wait: ## Poll until vLLM answers (first boot installs k3s and downloads weights)
 	@bash scripts/wait-healthy.sh
@@ -279,12 +300,19 @@ tunnel: _need-node ## Open the SSH tunnel in the background (:6443 kubernetes, :
 untunnel: ## Close the background tunnel
 	@API_PORT=$(API_PORT) bash scripts/tunnel.sh close
 
+.PHONY: prom
+prom: ## Prometheus on localhost:9090, in the background
+	@PROM_PORT=$(PROM_PORT) bash scripts/portfwd.sh prom ensure
+
 .PHONY: dash
-dash: ## Grafana on localhost:3000 (needs a tunnel; uses ./kubeconfig)
-	@echo "  Grafana: http://localhost:$(GRAFANA_PORT)   (user admin)"
-	@echo "  Password: kubectl -n monitoring get secret kps-grafana -o jsonpath='{.data.admin-password}' | base64 -d"
-	@echo ""
-	@KUBECONFIG=$(PWD)/kubeconfig kubectl port-forward -n monitoring svc/kps-grafana $(GRAFANA_PORT):80
+dash: ## Grafana on localhost:3000, in the background, with the login
+	@GRAFANA_PORT=$(GRAFANA_PORT) bash scripts/portfwd.sh grafana ensure
+	@echo "  user admin / password $$(KUBECONFIG=$(PWD)/kubeconfig kubectl -n monitoring get secret kps-grafana -o jsonpath='{.data.admin-password}' | base64 -d)"
+
+.PHONY: unforward
+unforward: ## Close the background Grafana and Prometheus forwards
+	@GRAFANA_PORT=$(GRAFANA_PORT) bash scripts/portfwd.sh grafana close
+	@PROM_PORT=$(PROM_PORT) bash scripts/portfwd.sh prom close
 
 .PHONY: promote
 promote: ## Advance the canary to the next step (or finish the rollout)

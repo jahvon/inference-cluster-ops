@@ -133,11 +133,12 @@ executables:
   - verb: open
     name: dashboard
     aliases: [grafana, dash]
+    tags: [observability, metrics, grafana]
     description: |
-      Grafana on localhost:3000, port-forwarded through the tunnel.
+      Open Grafana in a browser, with the login printed.
+      Two dashboards are provisioned: vLLM Serving SLIs and vLLM Rollout & SLO.
 
-      Runs in the foreground; Ctrl-C closes it. Prints the command that reads the
-      admin password out of the cluster.
+      Disconnect port-forwards with `disconnect forwards`.
     serial:
       dir: //
       execs:
@@ -145,3 +146,46 @@ executables:
           cmd: bash scripts/tunnel.sh ensure
         - name: grafana
           cmd: make dash
+        - ref: launch grafana
+
+  - verb: open
+    name: metrics
+    aliases: [prometheus, prom]
+    tags: [observability, metrics, prometheus]
+    description: |
+      Prometheus on localhost:9090, port-forwarded through the tunnel.
+      The recording rules behind the dashboards are all prefixed `sli:` and `slo:`.
+
+      Disconnect port-forwards with `disconnect forwards`.
+    serial:
+      dir: //
+      execs:
+        - name: tunnel
+          cmd: bash scripts/tunnel.sh ensure
+        - name: prometheus
+          cmd: make prom
+        - ref: launch prometheus
+
+  - verb: launch
+    name: grafana
+    visibility: internal
+    launch:
+      uri: http://localhost:3000
+
+  - verb: launch
+    name: prometheus
+    visibility: internal
+    launch:
+      uri: http://localhost:9090
+
+  - verb: disconnect
+    name: forwards
+    aliases: [unforward]
+    tags: [observability, metrics]
+    description: |
+      Close the backgrounded Grafana and Prometheus port-forwards.
+
+      The SSH tunnel is separate and survives this -- `disconnect tunnel` ends that.
+    exec:
+      dir: //
+      cmd: make unforward

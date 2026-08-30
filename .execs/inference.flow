@@ -200,3 +200,110 @@ executables:
     exec:
       dir: //
       cmd: make ssh
+
+  - verb: show
+    name: slo
+    aliases: [sli, latency]
+    tags: [observability, slo]
+    description: |
+      Latency percentiles, SLO violations and recovery times over a window.
+
+      The objectives it measures against live in `k8s/config.env` and are the same
+      ones the canary gate uses. Window defaults to the last hour; override with
+      SLO_RANGE=6h.
+
+      Needs traffic to be meaningful -- an idle cluster reads as 100% available
+      because there is nothing to fail. Run `benchmark baseline` first.
+    serial:
+      dir: //
+      execs:
+        - name: gather
+          cmd: make slo > .slo.json
+        - ref: generate slo
+
+  - verb: generate
+    name: slo
+    visibility: internal
+    render:
+      dir: //
+      templateFile: docs/slo.md
+      templateDataFile: .slo.json
+
+  - verb: benchmark
+    name: baseline
+    aliases: [bench, calibrate]
+    tags: [observability, slo, benchmark, load]
+    description: |
+      Drive load through Envoy and report throughput, latency percentiles and goodput.
+
+      Runs kubernetes-sigs/inference-perf as a Job inside the cluster -- the same
+      harness `start load` uses for sustained traffic, so the calibration number and
+      the number you watch under load mean the same thing.
+
+      Refuses to run while the sustained generators are up: that would measure
+      contention and quietly become the number your SLO thresholds are set from.
+
+      This is what produces the per-user token rate exactly, and the baseline the
+      thresholds in `k8s/config.env` should be set from.
+
+      Shape the run with BENCH_* in `k8s/config.env`. Raise BENCH_CONCURRENCY until
+      tokens/s stops climbing while TTFT keeps rising -- that is the knee.
+    serial:
+      dir: //
+      execs:
+        - name: run
+          cmd: make calibrate > .bench.json
+        - ref: generate baseline
+
+  # Internal: the presentation half of `benchmark baseline`.
+  - verb: generate
+    name: baseline
+    visibility: internal
+    render:
+      dir: //
+      templateFile: docs/bench.md
+      templateDataFile: .bench.json
+
+  - verb: start
+    name: load
+    aliases: [load, traffic]
+    tags: [observability, load, tenant]
+    description: |
+      Hold the cluster under sustained multi-tenant traffic.
+
+      Runs kubernetes-sigs/inference-perf as two tenants at once, shaped to
+      contend: `batch` sends 1024-token prompts whose long prefills occupy the
+      GPU, and `interactive` sends short ones and is the tenant you watch suffer
+      for it. That contention is the reason the per-tenant dimension exists.
+
+      Unlike `benchmark baseline` this produces no report -- it produces traffic.
+      The measurement is in Grafana and `show slo`. Leave it running while you
+      promote a canary, abort one, or preempt the node, and the SLO timeline shows
+      what it cost.
+
+      Shape it with LOAD_* in `k8s/config.env`. It keeps running until `stop load`.
+    exec:
+      dir: //
+      cmd: make load-start
+
+  - verb: stop
+    name: load
+    aliases: [unload]
+    tags: [observability, load, tenant]
+    description: |
+      Stop the sustained load generators.
+
+      Leaves their config in the cluster, so starting again is immediate.
+    exec:
+      dir: //
+      cmd: make load-stop
+
+  - verb: show
+    name: load
+    aliases: [traffic-status]
+    tags: [observability, load, tenant]
+    description: Whether the load generators are running, and how many replicas each tenant has.
+    exec:
+      logMode: text
+      dir: //
+      cmd: make load-status

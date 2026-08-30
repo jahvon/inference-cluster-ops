@@ -126,10 +126,20 @@ SUBST_VARS="$SUBST_VARS \$GPU_MEM_UTIL \$KV_CACHE_BYTES \$CANARY_WEIGHT \$PROM_U
 
 MANIFESTS="00-namespace.yaml 10-device-plugin-values.yaml 20-envoy.yaml
 35-dcgm-exporter.yaml 40-vllm-rollout.yaml 45-vllm-services.yaml
-55-servicemonitors.yaml 60-analysis-template.yaml"
+50-prometheus-rules.yaml 55-servicemonitors.yaml 60-analysis-template.yaml
+70-bench-job.yaml 72-load-generator.yaml"
 
-# 30-monitoring-values.yaml is deliberately absent: it is helm values containing
-# Grafana templating that envsubst would eat, and every value in it is static.
+# 70-bench-job.yaml and 72-load-generator.yaml are rendered and validated here but
+# NOT applied below: `make deploy` must never start firing traffic at the cluster.
+# scripts/calibrate.sh and scripts/load.sh apply the rendered copies on demand.
+
+# Two files are deliberately absent from this list, for the same reason:
+#   30-monitoring-values.yaml   helm values, static, and full of Grafana templating
+#   52-dashboards.yaml          Grafana dashboard JSON
+# Both contain `$__rate_interval`, `${DS_PROMETHEUS}` and friends. The allowlist
+# would spare those particular names, but nothing in either file needs substituting,
+# so the safest thing is to keep them out of the render path entirely.
+DASHBOARDS="52-dashboards.yaml"
 
 RENDERED=rendered
 render() { # render <file>  ->  prints rendered/<file>
@@ -255,6 +265,10 @@ fi
 
 echo "==> dcgm-exporter (GPU metrics)"
 kubectl apply -f "$(render 35-dcgm-exporter.yaml)"
+# The exported field list is a mounted ConfigMap and a ConfigMap change does not
+# restart a DaemonSet.
+kubectl -n inference rollout restart daemonset/dcgm-exporter
+kubectl -n inference rollout status daemonset/dcgm-exporter --timeout=3m
 
 echo "==> kube-prometheus-stack"
 helm upgrade --install "$KPS_RELEASE" prometheus-community/kube-prometheus-stack \
@@ -287,6 +301,7 @@ echo "==> argo rollouts"
 helm upgrade --install argo-rollouts argo/argo-rollouts \
   --version "$ARGO_ROLLOUTS_CHART_VERSION" \
   --namespace argo-rollouts --create-namespace \
+  --set controller.metrics.enabled=true \
   --wait
 
 echo "==> envoy"
@@ -301,6 +316,10 @@ kubectl apply -f "$(render 45-vllm-services.yaml)"
 kubectl apply -f "$(render 60-analysis-template.yaml)"
 kubectl apply -f "$(render 40-vllm-rollout.yaml)"
 kubectl apply -f "$(render 55-servicemonitors.yaml)"
+
+echo "==> SLI rules and dashboards"
+kubectl apply -f "$(render 50-prometheus-rules.yaml)"
+for f in $DASHBOARDS; do kubectl apply -f "$f"; done
 
 echo ""
 echo "  Deployed. Envoy is on NodePort $ENVOY_NODEPORT."

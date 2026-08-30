@@ -17,9 +17,8 @@ alertmanager: { enabled: false }
 
 prometheus:
   prometheusSpec:
-    # Scrape ServiceMonitors from every namespace, not just ones carrying the
-    # release label -- the vLLM and Envoy monitors live in `inference`.
     serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
     retention: 15d
     storageSpec:
       volumeClaimTemplate:

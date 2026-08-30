@@ -1,0 +1,168 @@
+# Sustained multi-tenant load via kubernetes-sigs/inference-perf.
+#
+# Two tenants, because one tenant is just traffic. `batch` is 1024-token prompts
+# (long prefills and prefill is where a time-sliced L4 gets taken away from the other pod).
+# `interactive` is short prompts, and is the tenant you watch suffer for it.
+#
+# The `x-tenant` header on each MUST match a virtual_cluster in k8s/20-envoy.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: load-interactive
+  namespace: inference
+  labels: { app: load-generator, tenant: interactive }
+data:
+  config.yml: |
+    api:
+      type: completion
+      streaming: true
+      headers:
+        x-tenant: interactive
+    server:
+      type: vllm
+      model_name: ${SERVED_MODEL_NAME}
+      base_url: http://envoy.inference.svc.cluster.local:8000
+      ignore_eos: true
+    load:
+      type: constant
+      interval: 1.0
+      stages:
+        - rate: ${LOAD_INTERACTIVE_RATE}
+          duration: ${LOAD_DURATION}
+      num_workers: 2
+      worker_max_concurrency: 4
+    data:
+      type: synthetic
+      input_distribution:
+        min: ${LOAD_INTERACTIVE_INPUT}
+        max: ${LOAD_INTERACTIVE_INPUT}
+        mean: ${LOAD_INTERACTIVE_INPUT}
+        std_dev: 0
+        total_count: 200
+      output_distribution:
+        min: ${LOAD_INTERACTIVE_OUTPUT}
+        max: ${LOAD_INTERACTIVE_OUTPUT}
+        mean: ${LOAD_INTERACTIVE_OUTPUT}
+        std_dev: 0
+        total_count: 200
+    tokenizer:
+      pretrained_model_name_or_path: ${MODEL_ID}
+    metrics:
+      type: default
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: load-batch
+  namespace: inference
+  labels: { app: load-generator, tenant: batch }
+data:
+  config.yml: |
+    api:
+      type: completion
+      streaming: true
+      headers:
+        x-tenant: batch
+    server:
+      type: vllm
+      model_name: ${SERVED_MODEL_NAME}
+      base_url: http://envoy.inference.svc.cluster.local:8000
+      ignore_eos: true
+    load:
+      type: constant
+      interval: 1.0
+      stages:
+        - rate: ${LOAD_BATCH_RATE}
+          duration: ${LOAD_DURATION}
+      num_workers: 2
+      worker_max_concurrency: 8
+    data:
+      type: synthetic
+      input_distribution:
+        min: ${LOAD_BATCH_INPUT}
+        max: ${LOAD_BATCH_INPUT}
+        mean: ${LOAD_BATCH_INPUT}
+        std_dev: 0
+        total_count: 200
+      output_distribution:
+        min: ${LOAD_BATCH_OUTPUT}
+        max: ${LOAD_BATCH_OUTPUT}
+        mean: ${LOAD_BATCH_OUTPUT}
+        std_dev: 0
+        total_count: 200
+    tokenizer:
+      pretrained_model_name_or_path: ${MODEL_ID}
+    metrics:
+      type: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-interactive
+  namespace: inference
+  labels: { app: load-generator, tenant: interactive }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: load-generator, tenant: interactive }
+  template:
+    metadata:
+      labels: { app: load-generator, tenant: interactive }
+    spec:
+      containers:
+        - name: inference-perf
+          image: ${INFERENCE_PERF_IMAGE}
+          command: ["inference-perf"]
+          args: ["--config_file", "/etc/config/config.yml"]
+          env:
+            # The tokenizer is read from the cache vLLM already populated rather
+            # than downloaded again.
+            - { name: HF_HOME, value: /root/.cache/huggingface }
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { memory: 2Gi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/config, readOnly: true }
+            - { name: hf-cache, mountPath: /root/.cache/huggingface }
+      volumes:
+        - name: config
+          configMap: { name: load-interactive }
+        - name: hf-cache
+          hostPath:
+            path: ${HF_CACHE_HOSTPATH}
+            type: DirectoryOrCreate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-batch
+  namespace: inference
+  labels: { app: load-generator, tenant: batch }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: load-generator, tenant: batch }
+  template:
+    metadata:
+      labels: { app: load-generator, tenant: batch }
+    spec:
+      containers:
+        - name: inference-perf
+          image: ${INFERENCE_PERF_IMAGE}
+          command: ["inference-perf"]
+          args: ["--config_file", "/etc/config/config.yml"]
+          env:
+            - { name: HF_HOME, value: /root/.cache/huggingface }
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { memory: 2Gi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/config, readOnly: true }
+            - { name: hf-cache, mountPath: /root/.cache/huggingface }
+      volumes:
+        - name: config
+          configMap: { name: load-batch }
+        - name: hf-cache
+          hostPath:
+            path: ${HF_CACHE_HOSTPATH}
+            type: DirectoryOrCreate

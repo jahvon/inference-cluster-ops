@@ -1,4 +1,42 @@
 # NVIDIA DCGM exporter: per-GPU utilization, memory, temperature and power.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dcgm-counters
+  namespace: inference
+  labels: { app: dcgm-exporter }
+data:
+  # Replaces the image's default-counters.csv. The default set has no DCGM_FI_PROF_*
+  # fields, and those are the only ones that answer the question this cluster actually
+  # has: is time-slicing sharing the GPU, or is one pod starving the other?
+  #
+  # DCGM_FI_DEV_GPU_UTIL cannot answer it. It reports whether ANY kernel was resident
+  # during the sample window, so with two vLLM pods sharing one L4 it pins near 100%
+  # whether the GPU is saturated or nearly idle. GR_ENGINE_ACTIVE is the fraction of
+  # time the compute engine was actually executing, which is the real headroom signal.
+  counters.csv: |
+    # Format: DCGM_FIELD_ID, prometheus_type, help_text
+
+    # Profiling (DCP) fields -- require NVIDIA_DRIVER_CAPABILITIES to include `compute`.
+    DCGM_FI_PROF_GR_ENGINE_ACTIVE,    gauge, Fraction of time the graphics/compute engine was active
+    DCGM_FI_PROF_SM_ACTIVE,           gauge, Fraction of time at least one warp was resident on an SM
+    DCGM_FI_PROF_SM_OCCUPANCY,        gauge, Fraction of resident warps against the maximum
+    DCGM_FI_PROF_PIPE_TENSOR_ACTIVE,  gauge, Fraction of time the tensor cores were active
+    DCGM_FI_PROF_DRAM_ACTIVE,         gauge, Fraction of time device memory was being read or written
+    DCGM_FI_PROF_PCIE_TX_BYTES,       counter, Bytes transmitted over PCIe
+    DCGM_FI_PROF_PCIE_RX_BYTES,       counter, Bytes received over PCIe
+
+    # Device fields. Kept so the dashboard degrades to something rather than nothing
+    # if the DCP fields above turn out to be unavailable.
+    DCGM_FI_DEV_GPU_UTIL,             gauge, GPU utilization (in %)
+    DCGM_FI_DEV_MEM_COPY_UTIL,        gauge, Memory utilization (in %)
+    DCGM_FI_DEV_FB_USED,              gauge, Framebuffer memory used (in MiB)
+    DCGM_FI_DEV_FB_FREE,              gauge, Framebuffer memory free (in MiB)
+    DCGM_FI_DEV_FB_TOTAL,             gauge, Total framebuffer memory (in MiB)
+    DCGM_FI_DEV_POWER_USAGE,          gauge, Power draw (in W)
+    DCGM_FI_DEV_GPU_TEMP,             gauge, GPU temperature (in C)
+    DCGM_FI_DEV_SM_CLOCK,             gauge, SM clock frequency (in MHz)
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -15,15 +53,19 @@ spec:
       containers:
         - name: dcgm-exporter
           image: nvcr.io/nvidia/k8s/dcgm-exporter:4.5.2-4.8.1-ubuntu22.04
+          # -c is the COLLECTION interval in milliseconds, and it is coupled to the
+          # scrape interval in 55-servicemonitors.yaml -- change one, change the
+          # other. The default is 30000, which against a 15s scrape means every
+          # second sample is a byte-identical duplicate of the last collection and
+          # the real resolution of every GPU panel is half what it appears to be.
+          args: ["-f", "/etc/dcgm-exporter/counters.csv", "-c", "15000"]
           ports:
             - { name: metrics, containerPort: 9400 }
           env:
-            # Deliberately NOT a `resources.limits: nvidia.com/gpu` request. Asking
-            # the device plugin for a GPU would consume one of the time slices and
-            # cost you a vLLM replica. The nvidia runtime is already the cluster
-            # default, so making the devices visible is all that is needed.
             - { name: NVIDIA_VISIBLE_DEVICES, value: "all" }
-            - { name: NVIDIA_DRIVER_CAPABILITIES, value: "utility" }
+            # `compute` is what the DCGM_FI_PROF_* fields need. With `utility` alone
+            # the profiling module cannot attach and those fields are silently absent
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: "compute,utility" }
           securityContext:
             runAsNonRoot: false
             capabilities:
@@ -31,6 +73,12 @@ spec:
           resources:
             requests: { cpu: 50m, memory: 128Mi }
             limits: { memory: 1Gi }
+          volumeMounts:
+            - { name: counters, mountPath: /etc/dcgm-exporter }
+      volumes:
+        - name: counters
+          configMap:
+            name: dcgm-counters
 ---
 apiVersion: v1
 kind: Service

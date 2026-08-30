@@ -10,10 +10,40 @@
 
 if [ -z "${VM_IP:-}" ] || [ -z "${SSH_USER:-}" ]; then
   _tf=$(bash scripts/tf.sh)
-  : "${VM_IP:=$(printf '%s\n' "$_tf" | sed -n 's/^VM_IP="\(.*\)"$/\1/p')}"
-  : "${SSH_USER:=$(printf '%s\n' "$_tf" | sed -n 's/^SSH_USER="\(.*\)"$/\1/p')}"
+  tfval() { printf '%s\n' "$_tf" | sed -n "s/^$1=\"\(.*\)\"$/\\1/p"; }
+  : "${VM_IP:=$(tfval VM_IP)}"
+  : "${SSH_USER:=$(tfval SSH_USER)}"
+
+  # Terraform's state lags the live instance after a stop/start: the external
+  # address is ephemeral and the provider does not always re-read it in the same
+  # apply that sets desired_status.
+  #
+  # Ask GCP directly, then RESYNC STATE so this path is taken once per drift
+  # rather than on every invocation. -refresh-only reads infrastructure and
+  # updates state; it changes nothing and creates nothing.
+  if [ -z "$VM_IP" ]; then
+    _proj=$(tfval PROJECT_ID); _zone=$(tfval ZONE); _inst=$(tfval INSTANCE_NAME)
+    if [ -n "$_proj" ] && [ -n "$_zone" ]; then
+      VM_IP=$(gcloud compute instances describe "${_inst:-inference-node}" \
+                --project "$_proj" --zone "$_zone" \
+                --format='value(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null || true)
+      if [ -n "$VM_IP" ]; then
+        echo "  terraform state was stale; resyncing ($VM_IP)" >&2
+        # Synchronous, once per drift: ~10s here buys correct state for every
+        # command after it. Backgrounding would race a short-lived caller like
+        # `make ssh` exiting before the refresh lands. Terraform's own state
+        # lock handles the concurrent case, and a failure is not fatal -- VM_IP
+        # is already correct for this run regardless.
+        terraform -chdir=terraform apply -refresh-only -auto-approve \
+          -var running=true >/dev/null 2>&1 || true
+      fi
+    fi
+    unset _proj _zone _inst
+  fi
   unset _tf
+  unset -f tfval
 fi
+
 SSH_USER="${SSH_USER:-ops}"
 
 # The private half of terraform's ssh_public_key_path. Deriving it means the key
