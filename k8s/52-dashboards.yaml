@@ -2221,7 +2221,7 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 8,
+            "w": 6,
             "x": 0,
             "y": 13
           },
@@ -2353,8 +2353,8 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 8,
-            "x": 8,
+            "w": 6,
+            "x": 6,
             "y": 13
           },
           "targets": [
@@ -2485,8 +2485,8 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 8,
-            "x": 16,
+            "w": 6,
+            "x": 12,
             "y": 13
           },
           "targets": [
@@ -2563,6 +2563,92 @@ data:
                 ]
               }
             ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 15,
+          "type": "timeseries",
+          "title": "In-flight by role",
+          "description": "Paired with 'TTFT p95 by role', this is the cold-start finding: Envoy is LEAST_REQUEST with no slow_start_config, so a pod that has just gone Ready has almost nothing in flight, reads as idle, and is therefore PREFERRED -- at exactly the moment it is slowest. Canary at or above stable while its TTFT is worse is that inversion, on a graph.\n\nONLY meaningful during a rollout. At rest the vllm-stable and vllm-canary Services both select every pod, so each role reports the whole fleet and the two lines are duplicates. Never sum across roles -- that double counts.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 18,
+            "y": 13
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:vllm:requests_running:by_role{role=\"stable\"}",
+              "legendFormat": "stable running",
+              "refId": "U",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:vllm:requests_running:by_role{role=\"canary\"}",
+              "legendFormat": "canary running",
+              "refId": "V",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:vllm:requests_waiting:by_role{role=\"canary\"}",
+              "legendFormat": "canary waiting",
+              "refId": "W",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never",
+                "pointSize": 8,
+                "spanNulls": false,
+                "axisSoftMin": 0,
+                "stacking": {
+                  "mode": "none"
+                }
+              }
+            },
+            "overrides": []
           },
           "options": {
             "legend": {
@@ -2692,6 +2778,179 @@ data:
                 "drawStyle": "line",
                 "lineWidth": 2,
                 "fillOpacity": 10,
+                "showPoints": "never",
+                "pointSize": 8,
+                "spanNulls": false,
+                "axisSoftMin": 0,
+                "stacking": {
+                  "mode": "none"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 16,
+          "type": "row",
+          "title": "Disruption",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 29
+          },
+          "panels": []
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "Truncations, rejections and retries",
+          "description": "What a rollout did to in-flight requests. Three outcomes, kept apart because only one of them is repairable by a retry.\n\nTRUNCATED: cut after response headers went downstream, so the client saw a 200 with a short body. Envoy cannot retry once headers are sent, and no vLLM metric records it -- a client-disconnect abort increments nothing, and the per-request histograms skip aborted requests. This counter is the only server-side evidence.\n\nREJECTED: the client got a 5xx; retries exhausted or not retryable.\n\nMASKED: a failure the retry policy hid. Watch this move opposite to truncations as the grace period is tuned.\n\nFleet-wide only: downstream_rq_tx_reset is HCM-scoped and carries no tenant label. For per-tenant or per-pod truncations use `flow show experiment`, which reads Envoy's access log.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 30
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:envoy:truncations:rate5m",
+              "legendFormat": "truncated/s",
+              "refId": "U",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:envoy:rejections:rate5m",
+              "legendFormat": "rejected/s",
+              "refId": "V",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:envoy:retries_masked:rate5m",
+              "legendFormat": "retry-masked/s",
+              "refId": "W",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never",
+                "pointSize": 8,
+                "spanNulls": false,
+                "axisSoftMin": 0,
+                "stacking": {
+                  "mode": "none"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 18,
+          "type": "timeseries",
+          "title": "Truncation ratio",
+          "description": "Truncations as a fraction of traffic, shaped like the error ratio so it can take a threshold later.\n\nDeliberately NOT part of sli:vllm:healthy yet. A truncation is a 200, so the SLO cannot currently see one -- a measured drain reported 100% availability while 9 streams were cut. Learn what this reads at rest and under a normal rollout across several runs, THEN wire it into the composite. A threshold picked before that aborts good rollouts.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 30
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:envoy:truncation_ratio:rate5m",
+              "legendFormat": "truncation ratio",
+              "refId": "U",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "slo:objective:error_ratio",
+              "legendFormat": "error-ratio objective (reference)",
+              "refId": "V",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 0,
                 "showPoints": "never",
                 "pointSize": 8,
                 "spanNulls": false,

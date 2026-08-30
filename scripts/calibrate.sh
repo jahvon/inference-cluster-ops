@@ -120,11 +120,12 @@ def attainment(name, objective):
     """
     How far up the distribution the objective still holds.
 
-    NOT goodput. Real goodput needs a per-request pass/fail, and inference-perf only
-    exposes aggregates on stdout. This brackets it instead: it reports the highest
-    measured percentile still under the objective, so "p99" means at least 99% of
-    requests met it and "below p50" means most did not. Coarser than a true ratio,
-    but it does not invent precision that was never measured.
+    A coarse bracket, kept as a fallback: it reports the highest measured percentile
+    still under the objective, so "p99" means at least 99% of requests met it and
+    "below p50" means most did not.
+
+    Superseded by the goodput block below whenever the harness reports one -- that is
+    a real per-request pass/fail rather than an inference from percentiles.
     """
     d = lat.get(name)
     if not d or not objective:
@@ -191,6 +192,46 @@ out["slo_attainment"] = {
 failures = report.get("failures", {}).get("count")
 if failures:
     out["errors"] = failures
+
+# Real goodput: the fraction of requests that met EVERY constraint, evaluated per
+# request by the harness rather than inferred from percentiles.
+#
+# One correction is needed. inference-perf divides by successful requests only, so
+# its goodput_percentage answers "of the requests that completed, how many were fast
+# enough" -- a run where nine tenths of requests errored and the rest were quick
+# would report 100%. Multiplying by the success ratio gives the number a user would
+# recognise: of everything sent, how much came back both correct AND on time.
+gp = ok_.get("goodput_metrics") or {}
+if gp:
+    ok_count = ok_.get("count") or 0
+    fail_count = report.get("failures", {}).get("count") or 0
+    sent = ok_count + fail_count
+    success_ratio = (ok_count / sent) if sent else None
+    among_ok = gp.get("goodput_percentage")
+
+    block = {
+        "good_requests": gp.get("good_requests"),
+        "total_requests": gp.get("total_requests"),
+        # As inference-perf reports it: share of SUCCESSFUL requests meeting the SLO.
+        "percentage_of_successful": rnd(among_ok, 2),
+        "success_ratio": rnd(success_ratio, 4),
+        "request_goodput_per_second": rnd(gp.get("request_goodput"), 3),
+        "token_goodput_per_second": rnd(gp.get("token_goodput"), 2),
+        "constraints": {
+            "ttft_seconds": float(os.environ["TTFT_SLO"]) or None,
+            "tpot_seconds": float(os.environ["TPOT_SLO"]) or None,
+        },
+    }
+    if isinstance(among_ok, (int, float)) and success_ratio is not None:
+        block["percentage_of_all_sent"] = round(among_ok * success_ratio, 2)
+
+    # Per-constraint attainment, so a miss says WHICH objective it missed.
+    per = {k[:-len("_attainment_percentage")]: rnd(v, 2)
+           for k, v in gp.items() if k.endswith("_attainment_percentage")}
+    if per:
+        block["attainment_percentage"] = [{"name": k, "percentage": v}
+                                          for k, v in sorted(per.items())]
+    out["goodput"] = block
 
 print(json.dumps(out, indent=2))
 '

@@ -261,6 +261,25 @@ load-stop: ## Stop the sustained load generators
 load-status: ## Are the load generators running
 	@bash scripts/load.sh status || true
 
+.PHONY: experiment-run
+# Scenario and variant are positional:  make experiment-run ARGS="drain stock"
+# EXPERIMENT_REPEAT=10 make experiment-run ARGS="good-revision"  measures the gate's
+# own false-positive rate.
+experiment-run: ## Roll the fleet under load and measure it. ARGS="<scenario> [variant]"
+	@bash scripts/experiment/run.sh $(ARGS)
+
+.PHONY: experiment-report
+experiment-report: ## One run as JSON (default: most recent). RUN=<run-id> to pick one
+	@bash scripts/experiment/report.sh $(RUN)
+
+.PHONY: experiment-compare
+experiment-compare: ## Every run as JSON, for comparison
+	@bash scripts/experiment/report.sh --all
+
+.PHONY: experiment-list
+experiment-list: ## Run directories on disk, oldest first
+	@ls -1 runs 2>/dev/null | grep . || echo "  no runs yet -- try 'make experiment-run ARGS=drain'"
+
 .PHONY: wait
 wait: ## Poll until vLLM answers (first boot installs k3s and downloads weights)
 	@bash scripts/wait-healthy.sh

@@ -34,3 +34,9 @@ k8s/rendered/
 # Generated reports (flow show slo / flow benchmark baseline)
 .slo.json
 .bench.json
+
+# Experiment runs. Kept out of git by default -- a run is a few hundred KB of probe
+# records. Commit one deliberately when it is a result worth keeping.
+runs/
+.experiment.json
+.experiments.json

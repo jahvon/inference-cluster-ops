@@ -272,7 +272,7 @@ executables:
       Hold the cluster under sustained multi-tenant traffic.
 
       Runs kubernetes-sigs/inference-perf as two tenants at once, shaped to
-      contend: `batch` sends 1024-token prompts whose long prefills occupy the
+      contend: `batch` sends the longer prompts whose prefills occupy the
       GPU, and `interactive` sends short ones and is the tenant you watch suffer
       for it. That contention is the reason the per-tenant dimension exists.
 

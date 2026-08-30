@@ -12,15 +12,24 @@ require_node || exit 1
 RANGE="${SLO_RANGE:-1h}"
 STEP="${SLO_STEP:-15s}"
 
+# An explicit window, as epoch seconds. Set by the experiment harness to pin the
+# report to one rollout; SLO_TO defaults to now so a run still in flight can be
+# read. When SLO_FROM is unset this stays a trailing SLO_RANGE window, which is
+# what `flow show slo` wants.
+FROM="${SLO_FROM:-}"
+TO="${SLO_TO:-}"
+
 bash scripts/tunnel.sh ensure >/dev/null || exit 1
 
 export KUBECONFIG="$PWD/kubeconfig"
 
-RANGE="$RANGE" STEP="$STEP" python3 - <<'PY'
+RANGE="$RANGE" STEP="$STEP" FROM="$FROM" TO="$TO" python3 - <<'PY'
 import json, os, subprocess, sys, time, urllib.parse
 
 RANGE = os.environ["RANGE"]
 STEP = os.environ["STEP"]
+FROM = os.environ.get("FROM", "").strip()
+TO = os.environ.get("TO", "").strip()
 
 # The operator-managed service name, fixed regardless of the helm release name.
 PROXY = ("/api/v1/namespaces/monitoring/services/prometheus-operated:9090"
@@ -52,8 +61,17 @@ def promq(path, params):
 
 
 def scalar(expr):
-    """Latest value of an instant query, or None."""
-    res, err = promq("query", {"query": expr})
+    """Value of an instant query at the window's end, or None.
+
+    AT is set below, after the window is resolved. For a trailing window it stays
+    None and this is a plain "latest value" query; for an explicit window it pins
+    every instant query to t_to, so a report about a finished experiment describes
+    that experiment rather than whatever the cluster is doing now.
+    """
+    params = {"query": expr}
+    if AT is not None:
+        params["time"] = f"{AT:.0f}"
+    res, err = promq("query", params)
     if err or not res:
         return None
     try:
@@ -62,19 +80,45 @@ def scalar(expr):
         return None
 
 
-now = time.time()
-span = dur(RANGE)
 step = dur(STEP)
 
+
+def epoch(name, s):
+    try:
+        return float(s)
+    except ValueError:
+        raise SystemExit(f"bad {name}: {s!r} (expected epoch seconds)")
+
+
+if FROM:
+    t_from = epoch("SLO_FROM", FROM)
+    t_to = epoch("SLO_TO", TO) if TO else time.time()
+    if t_to <= t_from:
+        raise SystemExit(f"empty window: SLO_FROM={t_from:.0f} is not before SLO_TO={t_to:.0f}")
+    span = t_to - t_from
+    duration = f"{span:.0f}s"
+else:
+    t_to = time.time()
+    span = dur(RANGE)
+    t_from = t_to - span
+    duration = RANGE
+
+AT = t_to if FROM else None
+
 report = {
-    "range": {"duration": RANGE, "step": STEP,
-              "from": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - span)),
-              "to": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))},
+    "range": {"duration": duration, "step": STEP,
+              "from": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t_from)),
+              "to": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t_to)),
+              "from_epoch": round(t_from, 3), "to_epoch": round(t_to, 3),
+              # Every sli: rule is a rate(...[5m]), so a window shorter than 5m is
+              # dominated by traffic from before it. The harness reports this rather
+              # than implying a precision the smoothing cannot deliver.
+              "smoothed_by_seconds": 300},
 }
 
 series, err = promq("query_range", {
-    "query": "sli:vllm:healthy", "start": f"{now - span:.0f}",
-    "end": f"{now:.0f}", "step": f"{step:.0f}",
+    "query": "sli:vllm:healthy", "start": f"{t_from:.0f}",
+    "end": f"{t_to:.0f}", "step": f"{step:.0f}",
 })
 
 if err is not None:
@@ -172,7 +216,10 @@ report["current"] = {
     "gpu_util_coarse": scalar("sli:gpu:util_coarse"),
 }
 
-tenants, terr = promq("query", {"query": "sli:tenant:requests:rate5m"})
+_tp = {"query": "sli:tenant:requests:rate5m"}
+if AT is not None:
+    _tp["time"] = f"{AT:.0f}"
+tenants, terr = promq("query", _tp)
 report["tenants"] = [] if terr or not tenants else sorted(
     ({"name": m["metric"].get("envoy_virtual_cluster", "?"),
       "requests_per_second": round(float(m["value"][1]), 4)}

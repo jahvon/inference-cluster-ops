@@ -84,6 +84,13 @@ spec:
                   key: token
                   optional: true
             - { name: HF_HUB_ENABLE_HF_TRANSFER, value: "1" }
+            # Normally the mount path itself, which is what makes a pod start warm.
+            # The experiment harness points it at an empty subdir under the same
+            # mount to get a genuinely cold pod without touching the warm cache.
+            - { name: HF_HOME, value: "${HF_HOME_PATH}" }
+            # Unused by vLLM, and that is the point: it is part of the pod template,
+            # so changing it changes the pod-template hash and Argo rolls.
+            - { name: EXPERIMENT_NONCE, value: "${EXPERIMENT_NONCE}" }
           resources:
             requests: { cpu: 500m, memory: 2Gi }
             limits:

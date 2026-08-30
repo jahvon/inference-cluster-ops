@@ -23,6 +23,33 @@ data:
                     # long generation, so requests die mid-stream with no useful
                     # error.
                     stream_idle_timeout: 0s
+                    # Per-request records, as JSON on stdout.
+                    #
+                    # This is the ONLY reliable place a mid-stream truncation is
+                    # visible. vLLM cannot report one: a client-disconnect abort
+                    # increments no counter at all and the per-request histograms
+                    # skip aborted requests entirely.
+                    access_log:
+                      - name: envoy.access_loggers.stdout
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                          log_format:
+                            json_format:
+                              t: "%START_TIME%"
+                              method: "%REQ(:METHOD)%"
+                              path: "%REQ(:PATH)%"
+                              tenant: "%REQ(X-TENANT)%"
+                              status: "%RESPONSE_CODE%"
+                              flags: "%RESPONSE_FLAGS%"
+                              details: "%RESPONSE_CODE_DETAILS%"
+                              conn_term: "%CONNECTION_TERMINATION_DETAILS%"
+                              transport_fail: "%UPSTREAM_TRANSPORT_FAILURE_REASON%"
+                              bytes_sent: "%BYTES_SENT%"
+                              duration_ms: "%DURATION%"
+                              ttfb_ms: "%RESPONSE_DURATION%"
+                              tx_ms: "%RESPONSE_TX_DURATION%"
+                              upstream: "%UPSTREAM_HOST%"
+                              attempts: "%UPSTREAM_REQUEST_ATTEMPT_COUNT%"
                     route_config:
                       name: vllm
                       virtual_hosts:
@@ -169,6 +196,10 @@ spec:
   template:
     metadata:
       labels: { app: envoy }
+      annotations:
+        # This puts a hash of the rendered ConfigMap in the pod template so
+        # `kubectl apply` rolls Envoy exactly when the config changed.
+        inference.local/config-hash: "${ENVOY_CONFIG_HASH}"
     spec:
       containers:
         - name: envoy

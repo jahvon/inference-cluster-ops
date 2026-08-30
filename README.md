@@ -144,3 +144,47 @@ Defaults sit at roughly half of measured capacity so the cluster stays healthy w
 load runs. That is deliberate: a baseline that already violates the SLO leaves a
 rollout or a preemption nothing to show. [k8s/config.env](k8s/config.env) documents how to crank it
 into deliberate violation.
+
+## Rollout experiments
+
+Observability tells you the fleet is unhealthy. These tell you what a *rollout* did to
+it, and let you compare one rollout strategy against another.
+
+```sh
+flow run experiment cold-rollout            # A: capacity loss then a cold pod taking traffic
+flow run experiment drain                   # B: rejections vs mid-stream truncations
+flow run experiment bad-revision            # C: bad deploy w/ rollout analysis
+flow run experiment bad-revision ungated    #    the same bad deploy w/o analysis
+flow show experiment                        # the most recent run
+flow analyze experiments                    # all runs side by side
+```
+
+Each run holds the fleet under load, rolls it, pins a measurement window to the
+rollout, and writes `runs/<run-id>/`. A scenario is just a set of `k8s/config.env`
+overrides in `experiments/<scenario>/<variant>.env` — a new variant needs no new code.
+
+Every scenario deliberately damages a live, billed cluster, so teardown runs from a
+trap: an interrupted run still stops the load and restores the baseline revision.
+
+### What each one is for
+
+**cold-rollout** points the new revision's `HF_HOME` at an empty directory, so it must
+download and load weights before serving. `maxSurge: 0` is not a choice here — two pods
+already use 15.5GB of the L4's 23GB, so a third does not fit — which means the fleet is
+at N-1 for the whole download window, and the pod that finally arrives is Ready but
+cold. Watch `sli:vllm:requests_running:by_role` next to
+`sli:vllm:ttft_seconds:p95:by_role`: Envoy is `LEAST_REQUEST` with no
+`slow_start_config`, so a fresh pod with nothing in flight reads as *idle* and gets
+preferred at exactly the moment it is slowest.
+
+**drain** rolls with long generations in flight. It counts three things separately,
+because they trade against each other: connection-level rejections (retryable and the
+retry policy already masks most), mid-stream truncations (**not** retryable — the client
+got a 200 and a short answer), and rollout duration. A longer grace period cuts
+truncations and lengthens the N-1 window, which is cold-rollout's problem. No single
+setting wins both.
+
+**bad-revision** serves with `--max-num-seqs=1`: batching collapses, latency degrades
+badly, and nothing crashes — so stock Argo advances on Ready and replaces every replica
+with a broken one. The headline is cumulative SLO-violation seconds, gated versus
+ungated.

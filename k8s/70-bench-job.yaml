@@ -58,6 +58,10 @@ data:
         per_stage: true
         per_request: false
         percentiles: [50, 90, 95, 99]
+      goodput:
+        constraints:
+          ttft: ${TTFT_P95_THRESHOLD}
+          tpot: ${TPOT_P95_THRESHOLD}
 ---
 apiVersion: batch/v1
 kind: Job

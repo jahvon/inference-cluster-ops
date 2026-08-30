@@ -123,6 +123,13 @@ echo ""
 # variable is a one-file change and cannot be half-done.
 SUBST_VARS=$(awk -F= '/^[A-Z0-9_]+=/{printf "$%s ", $1}' config.env)
 SUBST_VARS="$SUBST_VARS \$GPU_MEM_UTIL \$KV_CACHE_BYTES \$CANARY_WEIGHT \$PROM_URL"  # derived
+SUBST_VARS="$SUBST_VARS \$ENVOY_CONFIG_HASH"
+
+ENVOY_CONFIG_HASH="${ENVOY_CONFIG_HASH:-render-only}"
+export ENVOY_CONFIG_HASH
+
+# shasum on macOS, sha256sum on Linux -- this script runs on both.
+hash_file() { { shasum -a 256 "$1" 2>/dev/null || sha256sum "$1"; } | cut -c1-16; }
 
 MANIFESTS="00-namespace.yaml 10-device-plugin-values.yaml 20-envoy.yaml
 35-dcgm-exporter.yaml 40-vllm-rollout.yaml 45-vllm-services.yaml
@@ -305,10 +312,14 @@ helm upgrade --install argo-rollouts argo/argo-rollouts \
   --wait
 
 echo "==> envoy"
+# Two passes. The first renders with the placeholder hash and is what gets hashed;
+# the second carries the real value into the pod-template annotation.
+ENVOY_CONFIG_HASH="render-only"   # pass one is always hashed in this known state,
+export ENVOY_CONFIG_HASH          # so an inherited value cannot change the result
+render 20-envoy.yaml >/dev/null
+ENVOY_CONFIG_HASH=$(hash_file "$RENDERED/20-envoy.yaml")
+export ENVOY_CONFIG_HASH
 kubectl apply -f "$(render 20-envoy.yaml)"
-# A ConfigMap change alone does not restart the Deployment, so an edited Envoy
-# config would otherwise take effect at some arbitrary future restart.
-kubectl -n inference rollout restart deployment/envoy
 kubectl -n inference rollout status deployment/envoy --timeout=3m
 
 echo "==> vllm"

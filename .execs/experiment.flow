@@ -1,0 +1,95 @@
+# yaml-language-server: $schema=https://flowexec.io/schemas/flowfile_schema.json
+visibility: public
+tags: [experiment, rollout, observability]
+description: |
+  Rollout experiments.
+
+  Each run drives the fleet through a deliberate failure under load, pins a
+  measurement window to the rollout, and writes a comparable report to runs/.
+
+  The scenarios are defined in experiments/<scenario>/<variant>.env -- each one is
+  just a set of config.env overrides, so a variant needs no new code.
+
+executables:
+  - verb: run
+    name: experiment
+    aliases: [scenario, rollout-test]
+    description: |
+      Roll the fleet under load and measure what the rollout did.
+
+      Scenarios:
+        cold-rollout   capacity loss during a weight download, plus a cold pod that
+                       goes Ready and immediately absorbs its full share
+        drain          long generations in flight while a pod goes away --
+                       rejections and mid-stream truncations counted separately
+        bad-revision   a revision that degrades badly without crashing; run it once
+                       stock (gated) and once ungated for the comparison
+        good-revision  nothing changed but the nonce, for counting false positives
+
+      Teardown runs from a trapso an interrupted run still stops the load and restores the baseline revision.
+
+      Repeat a run with EXPERIMENT_REPEAT:
+
+        EXPERIMENT_REPEAT=10 flow run experiment good-revision
+    exec:
+      dir: //
+      args:
+        - pos: 1
+          envKey: SCENARIO
+          required: true
+        - pos: 2
+          envKey: VARIANT
+          default: stock
+      cmd: make experiment-run ARGS="$SCENARIO $VARIANT"
+
+  - verb: show
+    name: experiment
+    aliases: [result, last-run]
+    description: |
+      The most recent run: what the client saw, SLO violation over the window, and
+      whether the load balancer preferred the pod that was still warming.
+
+      Pass a run id to read an older one.
+    serial:
+      dir: //
+      execs:
+        - name: gather
+          cmd: make experiment-report RUN="${RUN:-}" > .experiment.json
+        - ref: generate experiment
+
+  - verb: generate
+    name: experiment
+    visibility: internal
+    render:
+      dir: //
+      templateFile: docs/experiment.md
+      templateDataFile: .experiment.json
+
+  - verb: analyze
+    name: experiments
+    aliases: [runs, results]
+    description: |
+      Every run side by side.
+    serial:
+      dir: //
+      execs:
+        - name: gather
+          cmd: make experiment-compare > .experiments.json
+        - ref: generate experiments
+
+  - verb: generate
+    name: experiments
+    visibility: internal
+    render:
+      dir: //
+      templateFile: docs/experiments.md
+      templateDataFile: .experiments.json
+
+  - verb: list
+    name: experiments
+    aliases: [ls-runs]
+    description: Run directories on disk.
+    exec:
+      dir: //
+      cmd: make experiment-list
+      logMode: text

@@ -148,6 +148,10 @@ spec:
           expr: sum(avg by (pod, engine) (vllm:num_requests_running))
         - record: sli:vllm:requests_waiting
           expr: sum(avg by (pod, engine) (vllm:num_requests_waiting))
+        - record: sli:vllm:requests_running:by_role
+          expr: sum by (role) (avg by (pod, engine, role) (vllm:num_requests_running))
+        - record: sli:vllm:requests_waiting:by_role
+          expr: sum by (role) (avg by (pod, engine, role) (vllm:num_requests_waiting))
         - record: sli:vllm:kv_cache_usage:max
           expr: max(vllm:kv_cache_usage_perc)
         - record: sli:vllm:preemptions:rate5m
@@ -211,6 +215,31 @@ spec:
             (((sli:vllm:tpot_seconds:p95 >= 0) < bool ${TPOT_P95_THRESHOLD}) or vector(1))
             *
             ((sli:envoy:error_ratio:rate5m < bool ${ERROR_RATIO_SLO}) or vector(1))
+
+        # --- disruption, as the client experienced it ------------------------
+        # TRUNCATION. Envoy cannot retry once response headers have gone downstream
+        # so a stream cut mid-generation reaches the client as a 200 with a short body.
+        #
+        # The access log in k8s/20-envoy.yaml carries the tenant dimension.
+        - record: sli:envoy:truncations:rate5m
+          expr: sum(rate(envoy_http_downstream_rq_tx_reset{envoy_http_conn_manager_prefix="vllm"}[5m])) or vector(0)
+
+        # REJECTION: the client got an error. Retries were exhausted or the failure
+        # was not retryable.
+        - record: sli:envoy:rejections:rate5m
+          expr: sum(rate(envoy_http_downstream_rq_5xx{envoy_http_conn_manager_prefix="vllm"}[5m])) or vector(0)
+
+        # MASKED: a failure the retry policy hid so the client saw a clean 200. This
+        # is the number that makes the retry policy's value visible.
+        - record: sli:envoy:retries_masked:rate5m
+          expr: sum(rate(envoy_cluster_upstream_rq_retry_success{envoy_cluster_name="vllm"}[5m])) or vector(0)
+
+        # Truncations as a FRACTION of traffic
+        - record: sli:envoy:truncation_ratio:rate5m
+          expr: |
+            (sli:envoy:truncations:rate5m or vector(0))
+            /
+            clamp_min(sum(rate(envoy_cluster_upstream_rq{envoy_cluster_name="vllm"}[5m])) or vector(0), 0.001)
 
         - record: sli:vllm:violating
           expr: 1 - sli:vllm:healthy

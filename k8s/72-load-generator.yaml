@@ -1,6 +1,6 @@
 # Sustained multi-tenant load via kubernetes-sigs/inference-perf.
 #
-# Two tenants, because one tenant is just traffic. `batch` is 1024-token prompts
+# Two tenants, because one tenant is just traffic. `batch` is longer prompts
 # (long prefills and prefill is where a time-sliced L4 gets taken away from the other pod).
 # `interactive` is short prompts, and is the tenant you watch suffer for it.
 #

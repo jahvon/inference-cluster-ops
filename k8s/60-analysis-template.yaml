@@ -22,35 +22,35 @@ spec:
     - name: p95-ttft
       # A pod that has served nothing produces no histogram. Wait before the
       # first query.
-      initialDelay: 2m
-      interval: 30s
-      count: 4
+      initialDelay: ${GATE_INITIAL_DELAY}
+      interval: ${GATE_INTERVAL}
+      count: ${GATE_COUNT}
       successCondition: "len(result) == 0 || result[0] < ${TTFT_P95_THRESHOLD}"
-      failureLimit: 2
+      failureLimit: ${GATE_FAILURE_LIMIT}
       consecutiveErrorLimit: 3
       provider:
         prometheus:
           address: ${PROM_URL}
           query: |
-            histogram_quantile(0.95,
-              sum(rate(vllm:time_to_first_token_seconds_bucket{role="canary"}[2m]))
+            histogram_quantile(${GATE_QUANTILE},
+              sum(rate(vllm:time_to_first_token_seconds_bucket{role="canary"}[${GATE_RATE_WINDOW}]))
               by (le)) >= 0
 
     # Decode speed. TTFT can look perfect while generation crawls -- a change that
     # slows per-token decode shows up here and nowhere else in this template.
     - name: p95-tpot
-      initialDelay: 2m
-      interval: 30s
-      count: 4
+      initialDelay: ${GATE_INITIAL_DELAY}
+      interval: ${GATE_INTERVAL}
+      count: ${GATE_COUNT}
       successCondition: "len(result) == 0 || result[0] < ${TPOT_P95_THRESHOLD}"
-      failureLimit: 2
+      failureLimit: ${GATE_FAILURE_LIMIT}
       consecutiveErrorLimit: 3
       provider:
         prometheus:
           address: ${PROM_URL}
           query: |
-            histogram_quantile(0.95,
-              sum(rate(vllm:request_time_per_output_token_seconds_bucket{role="canary"}[2m]))
+            histogram_quantile(${GATE_QUANTILE},
+              sum(rate(vllm:request_time_per_output_token_seconds_bucket{role="canary"}[${GATE_RATE_WINDOW}]))
               by (le)) >= 0
 
     # Correctness, not speed: a canary that is fast because it is failing fast would
@@ -59,16 +59,16 @@ spec:
     # clamp_min keeps the ratio defined when the canary has served nothing; the
     # numerator is then 0, so the result is a clean 0 rather than a divide by zero.
     - name: error-ratio
-      initialDelay: 2m
-      interval: 30s
-      count: 4
+      initialDelay: ${GATE_INITIAL_DELAY}
+      interval: ${GATE_INTERVAL}
+      count: ${GATE_COUNT}
       successCondition: "len(result) == 0 || result[0] < ${ERROR_RATIO_SLO}"
-      failureLimit: 2
+      failureLimit: ${GATE_FAILURE_LIMIT}
       consecutiveErrorLimit: 3
       provider:
         prometheus:
           address: ${PROM_URL}
           query: |
-            (sum(rate(vllm:request_success_total{role="canary",finished_reason="error"}[2m])) or vector(0))
+            (sum(rate(vllm:request_success_total{role="canary",finished_reason="error"}[${GATE_RATE_WINDOW}])) or vector(0))
             /
-            clamp_min(sum(rate(vllm:request_success_total{role="canary"}[2m])) or vector(0), 0.001)
+            clamp_min(sum(rate(vllm:request_success_total{role="canary"}[${GATE_RATE_WINDOW}])) or vector(0), 0.001)
