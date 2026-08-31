@@ -27,9 +27,8 @@ NVDP_CHART_VERSION=0.17.4
 ARGO_ROLLOUTS_CHART_VERSION=2.39.6
 KPS_CHART_VERSION=68.3.0
 
-# The AnalysisTemplate addresses Prometheus by service name, which is derived from
-# the release name. These are coupled -- change one and change 60-analysis-template.yaml.
 KPS_RELEASE=kps
+PROM_SVC_NAME=prometheus-operated
 
 # ---------------------------------------------------------------------------
 # 1. Configuration
@@ -94,9 +93,7 @@ export KV_CACHE_BYTES
 CANARY_WEIGHT=$(awk -v n="$VLLM_REPLICAS" 'BEGIN{printf "%d", 100/n}')
 export CANARY_WEIGHT
 
-# Overwritten with the discovered service before the real apply; this default
-# only has to keep --render-only substituting cleanly with no cluster to ask.
-export PROM_URL="${PROM_URL:-http://prometheus.monitoring:9090}"
+export PROM_URL="${PROM_URL:-http://$PROM_SVC_NAME.monitoring:9090}"
 
 echo ""
 echo "  model     $MODEL_ID  (served as '$SERVED_MODEL_NAME')"
@@ -284,19 +281,10 @@ helm upgrade --install "$KPS_RELEASE" prometheus-community/kube-prometheus-stack
   --values 30-monitoring-values.yaml \
   --wait --timeout 10m
 
-# The AnalysisTemplate addresses Prometheus by service name. Use the
-# operator-managed `prometheus-operated` service rather than the release-named
-# one: prometheus-operator creates it for any Prometheus CR under a fixed name,
-# so it cannot drift when the helm release or chart is renamed. Getting this
-# wrong does not fail here -- it fails during a canary, as an analysis error
-# that aborts the rollout and says nothing about DNS.
-#
-# `|| true` matters: with `set -e`, a kubectl that finds nothing exits non-zero
-# and would kill the script before the check below could explain why.
-PROM_SVC=$(kubectl -n monitoring get svc prometheus-operated \
+PROM_SVC=$(kubectl -n monitoring get svc "$PROM_SVC_NAME" \
              -o jsonpath='{.metadata.name}' 2>/dev/null || true)
 if [ -z "$PROM_SVC" ]; then
-  echo "ERROR: no 'prometheus-operated' service in the monitoring namespace." >&2
+  echo "ERROR: no '$PROM_SVC_NAME' service in the monitoring namespace." >&2
   echo "  The canary's latency gate would have nothing to query." >&2
   echo "  Check that kube-prometheus-stack installed:  kubectl -n monitoring get pods" >&2
   exit 1
