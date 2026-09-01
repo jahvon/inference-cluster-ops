@@ -72,6 +72,13 @@ if [ "$GPU_TIMESLICE_REPLICAS" -lt "$VLLM_REPLICAS" ]; then
   exit 1
 fi
 
+if [ "$TERMINATION_GRACE_SECONDS" -le "$PRESTOP_SLEEP_SECONDS" ]; then
+  echo "ERROR: TERMINATION_GRACE_SECONDS ($TERMINATION_GRACE_SECONDS) <= PRESTOP_SLEEP_SECONDS ($PRESTOP_SLEEP_SECONDS)." >&2
+  echo "  The grace period includes the preStop hook, so the pod would be killed" >&2
+  echo "  mid-hook and truncate the streams the hook exists to protect." >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # 3. Derived values
 #

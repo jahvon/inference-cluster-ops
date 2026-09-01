@@ -105,7 +105,7 @@ cleanup() {
   # the rendered Rollout restores spec.strategy too, so an ungated arm's patched-out
   # analysis step comes back by the same step.
   ( unset HF_HOME_PATH EXPERIMENT_NONCE EXTRA_VLLM_ARGS ROLLOUT_ANALYSIS \
-          STARTUP_DELAY_SECONDS
+          STARTUP_DELAY_SECONDS PRESTOP_SLEEP_SECONDS TERMINATION_GRACE_SECONDS
     apply_revision ) >/dev/null 2>&1
   for d in $COLD_DIRS; do
     [ -n "$d" ] && node_ssh "sudo rm -rf '$d'" >/dev/null 2>&1
