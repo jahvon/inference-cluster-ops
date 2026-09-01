@@ -1505,7 +1505,7 @@ data:
           "id": 24,
           "type": "timeseries",
           "title": "Error ratio",
-          "description": "Envoy's ratio is what the client actually saw, AFTER retries. vLLM's is what the pods produced. Envoy below vLLM means retries are successfully hiding pod-level failures; Envoy above vLLM means requests are failing before they reach a pod.",
+          "description": "Envoy's ratio is what the client actually saw, AFTER retries. vLLM's is what the pods produced. Envoy below vLLM means retries are successfully hiding pod-level failures; Envoy above vLLM means requests are failing before they reach a pod.\n\nTruncations are here because they are part of the composite health SLI: a stream cut mid-generation is a 200 with a short body, so it appears in neither error ratio above.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROM}"
@@ -1546,9 +1546,33 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
+              "expr": "sli:envoy:truncation_ratio:rate5m",
+              "legendFormat": "truncated mid-stream",
+              "refId": "TR",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
               "expr": "slo:objective:error_ratio",
               "legendFormat": "objective",
               "refId": "L",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "slo:objective:truncation_ratio",
+              "legendFormat": "truncation objective",
+              "refId": "TO",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -1743,12 +1767,12 @@ data:
     {
       "uid": "vllm-rollout-slo",
       "title": "vLLM Rollout & SLO",
-      "description": "Service level objective state, violation windows, canary versus stable, and recovery. Thresholds come from k8s/config.env.",
+      "description": "What a rollout does to the fleet, with Argo Rollouts as the instrument: rollout state, the gate's own verdict, SLO violation windows, and canary versus stable. SLIs use the rollout rate window from k8s/config.env; thresholds come from the same file.",
       "tags": [
         "vllm",
-        "inference",
+        "rollout",
         "slo",
-        "rollout"
+        "argo"
       ],
       "schemaVersion": 39,
       "version": 1,
@@ -1774,9 +1798,9 @@ data:
       },
       "panels": [
         {
-          "id": 1,
+          "id": 2,
           "type": "row",
-          "title": "Service level objective",
+          "title": "Rollout state -- the instrument",
           "collapsed": false,
           "gridPos": {
             "h": 1,
@@ -1787,10 +1811,10 @@ data:
           "panels": []
         },
         {
-          "id": 2,
+          "id": 3,
           "type": "stat",
-          "title": "Current SLO state",
-          "description": "The composite SLI: healthy only while TTFT p95, TPOT p95 and the error ratio are all within objective. An idle cluster counts as healthy -- with no traffic the latency quantiles are absent, and treating absent as violating would log every quiet period as an outage.",
+          "title": "Rollout phase",
+          "description": "Argo's own view of the Rollout object. Everything below is read against this: if this is not Progressing, you are looking at steady state, not a rollout.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROM}"
@@ -1807,9 +1831,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "sli:vllm:healthy",
-              "legendFormat": "",
-              "refId": "O",
+              "expr": "rollout_phase{exported_namespace=\"inference\"} == 1",
+              "legendFormat": "{{phase}}",
+              "refId": "A",
               "editorMode": "code",
               "range": false,
               "instant": true
@@ -1818,101 +1842,17 @@ data:
           "fieldConfig": {
             "defaults": {
               "unit": "short",
-              "decimals": 0,
               "mappings": [
                 {
                   "type": "value",
                   "options": {
-                    "0": {
-                      "text": "VIOLATING",
-                      "color": "red",
-                      "index": 0
-                    },
                     "1": {
-                      "text": "Healthy",
-                      "color": "green",
-                      "index": 1
+                      "text": "-",
+                      "index": 0
                     }
                   }
                 }
-              ],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "red",
-                    "value": null
-                  },
-                  {
-                    "color": "green",
-                    "value": 1
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "fields": "",
-              "values": false
-            },
-            "colorMode": "value",
-            "graphMode": "area",
-            "textMode": "auto",
-            "justifyMode": "auto"
-          }
-        },
-        {
-          "id": 3,
-          "type": "stat",
-          "title": "Time in violation",
-          "description": "Total seconds spent outside objective over the selected time range, sampled at the 15s rule interval. For the breakdown into individual incidents and their recovery times, run `flow show slo`.",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROM}"
-          },
-          "gridPos": {
-            "h": 5,
-            "w": 5,
-            "x": 5,
-            "y": 1
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROM}"
-              },
-              "expr": "sum_over_time(sli:vllm:violating[$__range:15s]) * 15",
-              "legendFormat": "",
-              "refId": "P",
-              "editorMode": "code",
-              "range": false,
-              "instant": true
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "s",
-              "decimals": 0,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "red",
-                    "value": 1
-                  }
-                ]
-              }
+              ]
             },
             "overrides": []
           },
@@ -1933,8 +1873,8 @@ data:
         {
           "id": 4,
           "type": "stat",
-          "title": "TTFT p95",
-          "description": "Current p95 time to first token, fleet-wide.",
+          "title": "Serving capacity",
+          "description": "available / desired replicas. With maxSurge:0 this drops to (N-1)/N for the whole pod-replacement window -- the capacity loss that no latency percentile shows while the surviving pods still absorb the traffic.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROM}"
@@ -1942,6 +1882,74 @@ data:
           "gridPos": {
             "h": 5,
             "w": 5,
+            "x": 5,
+            "y": 1
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:rollout:capacity_ratio",
+              "legendFormat": "",
+              "refId": "B",
+              "editorMode": "code",
+              "range": false,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "mappings": [],
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 0.51
+                  },
+                  {
+                    "color": "green",
+                    "value": 0.99
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto",
+            "justifyMode": "auto"
+          }
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "Replicas available",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
             "x": 10,
             "y": 1
           },
@@ -1951,9 +1959,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "sli:vllm:ttft_seconds:p95",
+              "expr": "sli:rollout:replicas_available",
               "legendFormat": "",
-              "refId": "Q",
+              "refId": "C",
               "editorMode": "code",
               "range": false,
               "instant": true
@@ -1961,9 +1969,9 @@ data:
           ],
           "fieldConfig": {
             "defaults": {
-              "unit": "s",
-              "decimals": 3,
+              "unit": "short",
               "mappings": [],
+              "decimals": 0,
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -1984,67 +1992,7 @@ data:
               "fields": "",
               "values": false
             },
-            "colorMode": "none",
-            "graphMode": "area",
-            "textMode": "auto",
-            "justifyMode": "auto"
-          }
-        },
-        {
-          "id": 5,
-          "type": "stat",
-          "title": "TPOT p95",
-          "description": "Current p95 time per output token, fleet-wide.",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROM}"
-          },
-          "gridPos": {
-            "h": 5,
-            "w": 5,
-            "x": 15,
-            "y": 1
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROM}"
-              },
-              "expr": "sli:vllm:tpot_seconds:p95",
-              "legendFormat": "",
-              "refId": "R",
-              "editorMode": "code",
-              "range": false,
-              "instant": true
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "s",
-              "decimals": 4,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "text",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "fields": "",
-              "values": false
-            },
-            "colorMode": "none",
+            "colorMode": "value",
             "graphMode": "area",
             "textMode": "auto",
             "justifyMode": "auto"
@@ -2053,8 +2001,8 @@ data:
         {
           "id": 6,
           "type": "stat",
-          "title": "Error ratio",
-          "description": "Current 5xx ratio as seen by the client, after Envoy retries.",
+          "title": "Replicas updated",
+          "description": "How many pods are on the new revision. Reaches desired only after the gate passes.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROM}"
@@ -2062,7 +2010,7 @@ data:
           "gridPos": {
             "h": 5,
             "w": 4,
-            "x": 20,
+            "x": 14,
             "y": 1
           },
           "targets": [
@@ -2071,9 +2019,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "sli:envoy:error_ratio:rate5m",
+              "expr": "sli:rollout:replicas_updated",
               "legendFormat": "",
-              "refId": "S",
+              "refId": "D",
               "editorMode": "code",
               "range": false,
               "instant": true
@@ -2081,9 +2029,9 @@ data:
           ],
           "fieldConfig": {
             "defaults": {
-              "unit": "percentunit",
-              "decimals": 3,
+              "unit": "short",
               "mappings": [],
+              "decimals": 0,
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -2104,7 +2052,7 @@ data:
               "fields": "",
               "values": false
             },
-            "colorMode": "none",
+            "colorMode": "value",
             "graphMode": "area",
             "textMode": "auto",
             "justifyMode": "auto"
@@ -2112,15 +2060,95 @@ data:
         },
         {
           "id": 7,
-          "type": "state-timeline",
-          "title": "SLO state over time",
-          "description": "Every violation window, in order. This is the series `flow show slo` range-queries to derive incident durations and recovery times; read this for the shape and the report for the numbers.",
+          "type": "stat",
+          "title": "Gate evaluating",
+          "description": "1 while an AnalysisRun is Running. The analysis clock starts when the canary pod goes READY, not when the rollout starts.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROM}"
           },
           "gridPos": {
-            "h": 6,
+            "h": 5,
+            "w": 6,
+            "x": 18,
+            "y": 1
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:analysis:running",
+              "legendFormat": "",
+              "refId": "E",
+              "editorMode": "code",
+              "range": false,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "idle",
+                      "color": "text",
+                      "index": 0
+                    },
+                    "1": {
+                      "text": "EVALUATING",
+                      "color": "blue",
+                      "index": 1
+                    }
+                  }
+                }
+              ],
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  },
+                  {
+                    "color": "blue",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto",
+            "justifyMode": "auto"
+          }
+        },
+        {
+          "id": 8,
+          "type": "state-timeline",
+          "title": "Rollout phase over time",
+          "description": "The master timeline. Line every panel below up against this to read what the rollout did to the fleet.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 5,
             "w": 24,
             "x": 0,
             "y": 6
@@ -2131,9 +2159,1002 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "sli:vllm:healthy",
-              "legendFormat": "SLO",
+              "expr": "rollout_phase{exported_namespace=\"inference\"} == 1",
+              "legendFormat": "{{phase}}",
+              "refId": "F",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "1": {
+                      "text": " ",
+                      "index": 0
+                    }
+                  }
+                }
+              ],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue",
+                    "value": null
+                  }
+                ]
+              },
+              "custom": {
+                "lineWidth": 0,
+                "fillOpacity": 90
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "mergeValues": true,
+            "showValue": "never",
+            "rowHeight": 0.9,
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          }
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Replicas through the rollout",
+          "description": "desired / available / updated / unavailable, straight from the Argo controller. The gap between desired and available IS the capacity loss.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 0,
+            "y": 11
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:rollout:replicas_desired",
+              "legendFormat": "desired",
+              "refId": "G",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:rollout:replicas_available",
+              "legendFormat": "available",
+              "refId": "H",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:rollout:replicas_updated",
+              "legendFormat": "updated",
+              "refId": "I",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:rollout:replicas_unavailable",
+              "legendFormat": "unavailable",
+              "refId": "J",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never",
+                "pointSize": 8,
+                "spanNulls": false,
+                "axisSoftMin": 0,
+                "stacking": {
+                  "mode": "none"
+                }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "desired"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "text"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "available"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "updated"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "blue"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "unavailable"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Serving capacity vs SLO health",
+          "description": "Capacity and health on one axis. A rollout that costs capacity without breaking the SLO is the common case -- and the reason capacity needs its own signal.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 12,
+            "y": 11
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:rollout:capacity_ratio",
+              "legendFormat": "capacity",
+              "refId": "K",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:vllm:healthy:rollout",
+              "legendFormat": "SLO healthy",
+              "refId": "L",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "pointSize": 8,
+                "spanNulls": false,
+                "axisSoftMin": 0,
+                "stacking": {
+                  "mode": "none"
+                }
+              },
+              "max": 1.1
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "capacity"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "orange"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "SLO healthy"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 11,
+          "type": "row",
+          "title": "Gate decision -- did Argo catch it",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 18
+          },
+          "panels": []
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "AnalysisRuns by phase",
+          "description": "The gate's lifecycle. Successful and Failed are cumulative because Argo retains finished runs, so read the STEPS, not the level.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 0,
+            "y": 19
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sum by (phase) (analysis_run_phase{exported_namespace=\"inference\"} == 1)",
+              "legendFormat": "{{phase}}",
+              "refId": "M",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "pointSize": 8,
+                "spanNulls": false,
+                "axisSoftMin": 0,
+                "stacking": {
+                  "mode": "none"
+                }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Successful"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Failed"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Error"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "orange"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Running"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "blue"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "Gate failures by metric",
+          "description": "Which objective the gate tripped on. A step here with no matching step in the SLO panels below is a false positive; SLO violation with no step here is a miss.\n\nTruncations can never appear -- they are counted at Envoy's downstream listener, which has no canary/stable dimension, so the gate cannot attribute one to the revision under test.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 12,
+            "y": 19
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:analysis:metric_failed",
+              "legendFormat": "{{metric}}",
+              "refId": "N",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "pointSize": 8,
+                "spanNulls": false,
+                "axisSoftMin": 0,
+                "stacking": {
+                  "mode": "none"
+                }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "p95-ttft"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "p95-tpot"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "orange"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "error-ratio"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "purple"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 14,
+          "type": "row",
+          "title": "Service level objective",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 26
+          },
+          "panels": []
+        },
+        {
+          "id": 15,
+          "type": "stat",
+          "title": "Current SLO state",
+          "description": "The composite SLI over the rollout window: healthy only while TTFT p95, TPOT p95, the error ratio AND the truncation ratio are all within objective. An idle cluster counts as healthy.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 0,
+            "y": 27
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:vllm:healthy:rollout",
+              "legendFormat": "",
+              "refId": "O",
+              "editorMode": "code",
+              "range": false,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "VIOLATING",
+                      "color": "red",
+                      "index": 0
+                    },
+                    "1": {
+                      "text": "Healthy",
+                      "color": "green",
+                      "index": 1
+                    }
+                  }
+                }
+              ],
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto",
+            "justifyMode": "auto"
+          }
+        },
+        {
+          "id": 16,
+          "type": "stat",
+          "title": "Time in violation",
+          "description": "Seconds spent outside objective in the visible range, measured on the rollout window.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 4,
+            "y": 27
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sum_over_time(sli:vllm:violating:rollout[$__range:15s]) * 15",
+              "legendFormat": "",
+              "refId": "P",
+              "editorMode": "code",
+              "range": false,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "mappings": [],
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto",
+            "justifyMode": "auto"
+          }
+        },
+        {
+          "id": 17,
+          "type": "stat",
+          "title": "TTFT p95",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 8,
+            "y": 27
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:vllm:ttft_seconds:p95:rollout",
+              "legendFormat": "",
+              "refId": "Q",
+              "editorMode": "code",
+              "range": false,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto",
+            "justifyMode": "auto"
+          }
+        },
+        {
+          "id": 18,
+          "type": "stat",
+          "title": "TPOT p95",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 12,
+            "y": 27
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:vllm:tpot_seconds:p95:rollout",
+              "legendFormat": "",
+              "refId": "R",
+              "editorMode": "code",
+              "range": false,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto",
+            "justifyMode": "auto"
+          }
+        },
+        {
+          "id": 19,
+          "type": "stat",
+          "title": "Error ratio",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 16,
+            "y": 27
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:envoy:error_ratio:rollout",
+              "legendFormat": "",
+              "refId": "S",
+              "editorMode": "code",
+              "range": false,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto",
+            "justifyMode": "auto"
+          }
+        },
+        {
+          "id": 20,
+          "type": "stat",
+          "title": "Truncation ratio",
+          "description": "Streams cut off mid-generation. Not a 5xx and not a vLLM error -- the client got a 200 with a short body, so this is the only objective that sees a drain.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 20,
+            "y": 27
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:envoy:truncation_ratio:rollout",
+              "legendFormat": "",
               "refId": "T",
+              "editorMode": "code",
+              "range": false,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto",
+            "justifyMode": "auto"
+          }
+        },
+        {
+          "id": 21,
+          "type": "state-timeline",
+          "title": "SLO state over time",
+          "description": "Every violation window, in order, on the rollout window. `flow show slo` derives incident durations from this series -- read here for the shape and the report for the numbers.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROM}"
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 24,
+            "x": 0,
+            "y": 32
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:vllm:healthy:rollout",
+              "legendFormat": "SLO",
+              "refId": "U",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2198,7 +3219,7 @@ data:
           }
         },
         {
-          "id": 8,
+          "id": 22,
           "type": "row",
           "title": "Canary versus stable",
           "collapsed": false,
@@ -2206,15 +3227,15 @@ data:
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 12
+            "y": 38
           },
           "panels": []
         },
         {
-          "id": 9,
+          "id": 23,
           "type": "timeseries",
           "title": "TTFT p95 by role",
-          "description": "The comparison the canary gate actually makes. A canary above the objective line for the duration of the analysis run aborts the rollout.\n\nThe `role` label reaches these series from the vllm-stable / vllm-canary Services via the ServiceMonitor's `targetLabels: [role]`. It exists on vLLM metrics only -- Envoy and DCGM series have no canary/stable dimension, so every other panel here is fleet-wide.",
+          "description": "The comparison the canary gate actually makes -- these are the exact series the AnalysisTemplate queries, so a rollout aborted by the gate shows the number that aborted it.\n\nThe `role` label reaches these series from the vllm-stable / vllm-canary Services via the ServiceMonitor's `targetLabels: [role]`. It exists on vLLM metrics only -- Envoy and DCGM series have no canary/stable dimension.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROM}"
@@ -2223,7 +3244,7 @@ data:
             "h": 8,
             "w": 6,
             "x": 0,
-            "y": 13
+            "y": 39
           },
           "targets": [
             {
@@ -2231,9 +3252,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "sli:vllm:ttft_seconds:p95:by_role{role=\"stable\"}",
+              "expr": "sli:vllm:ttft_seconds:p95:by_role:rollout{role=\"stable\"}",
               "legendFormat": "stable",
-              "refId": "U",
+              "refId": "V",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2243,9 +3264,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "sli:vllm:ttft_seconds:p95:by_role{role=\"canary\"}",
+              "expr": "sli:vllm:ttft_seconds:p95:by_role:rollout{role=\"canary\"}",
               "legendFormat": "canary",
-              "refId": "V",
+              "refId": "W",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2257,7 +3278,7 @@ data:
               },
               "expr": "slo:objective:ttft_seconds",
               "legendFormat": "objective",
-              "refId": "W",
+              "refId": "X",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2290,7 +3311,7 @@ data:
                     "id": "color",
                     "value": {
                       "mode": "fixed",
-                      "fixedColor": "#3274D9"
+                      "fixedColor": "green"
                     }
                   }
                 ]
@@ -2305,7 +3326,7 @@ data:
                     "id": "color",
                     "value": {
                       "mode": "fixed",
-                      "fixedColor": "#CC6A22"
+                      "fixedColor": "orange"
                     }
                   }
                 ]
@@ -2320,8 +3341,22 @@ data:
                     "id": "color",
                     "value": {
                       "mode": "fixed",
-                      "fixedColor": "#8E8E8E"
+                      "fixedColor": "red"
                     }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
                   }
                 ]
               }
@@ -2343,10 +3378,10 @@ data:
           }
         },
         {
-          "id": 10,
+          "id": 24,
           "type": "timeseries",
           "title": "TPOT p95 by role",
-          "description": "Decode speed of the new version against the old.\n\nThe `role` label reaches these series from the vllm-stable / vllm-canary Services via the ServiceMonitor's `targetLabels: [role]`. It exists on vLLM metrics only -- Envoy and DCGM series have no canary/stable dimension, so every other panel here is fleet-wide.",
+          "description": "The comparison the canary gate actually makes -- these are the exact series the AnalysisTemplate queries, so a rollout aborted by the gate shows the number that aborted it.\n\nThe `role` label reaches these series from the vllm-stable / vllm-canary Services via the ServiceMonitor's `targetLabels: [role]`. It exists on vLLM metrics only -- Envoy and DCGM series have no canary/stable dimension.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROM}"
@@ -2355,7 +3390,7 @@ data:
             "h": 8,
             "w": 6,
             "x": 6,
-            "y": 13
+            "y": 39
           },
           "targets": [
             {
@@ -2363,9 +3398,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "sli:vllm:tpot_seconds:p95:by_role{role=\"stable\"}",
+              "expr": "sli:vllm:tpot_seconds:p95:by_role:rollout{role=\"stable\"}",
               "legendFormat": "stable",
-              "refId": "X",
+              "refId": "Y",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2375,9 +3410,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "sli:vllm:tpot_seconds:p95:by_role{role=\"canary\"}",
+              "expr": "sli:vllm:tpot_seconds:p95:by_role:rollout{role=\"canary\"}",
               "legendFormat": "canary",
-              "refId": "Y",
+              "refId": "Z",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2389,7 +3424,7 @@ data:
               },
               "expr": "slo:objective:tpot_seconds",
               "legendFormat": "objective",
-              "refId": "Z",
+              "refId": "A",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2422,7 +3457,7 @@ data:
                     "id": "color",
                     "value": {
                       "mode": "fixed",
-                      "fixedColor": "#3274D9"
+                      "fixedColor": "green"
                     }
                   }
                 ]
@@ -2437,7 +3472,7 @@ data:
                     "id": "color",
                     "value": {
                       "mode": "fixed",
-                      "fixedColor": "#CC6A22"
+                      "fixedColor": "orange"
                     }
                   }
                 ]
@@ -2452,8 +3487,22 @@ data:
                     "id": "color",
                     "value": {
                       "mode": "fixed",
-                      "fixedColor": "#8E8E8E"
+                      "fixedColor": "red"
                     }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
                   }
                 ]
               }
@@ -2475,10 +3524,10 @@ data:
           }
         },
         {
-          "id": 11,
+          "id": 25,
           "type": "timeseries",
           "title": "End-to-end p95 by role",
-          "description": "Whole-request latency by version.\n\nThe `role` label reaches these series from the vllm-stable / vllm-canary Services via the ServiceMonitor's `targetLabels: [role]`. It exists on vLLM metrics only -- Envoy and DCGM series have no canary/stable dimension, so every other panel here is fleet-wide.",
+          "description": "The comparison the canary gate actually makes -- these are the exact series the AnalysisTemplate queries, so a rollout aborted by the gate shows the number that aborted it.\n\nThe `role` label reaches these series from the vllm-stable / vllm-canary Services via the ServiceMonitor's `targetLabels: [role]`. It exists on vLLM metrics only -- Envoy and DCGM series have no canary/stable dimension.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROM}"
@@ -2487,7 +3536,7 @@ data:
             "h": 8,
             "w": 6,
             "x": 12,
-            "y": 13
+            "y": 39
           },
           "targets": [
             {
@@ -2495,9 +3544,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "sli:vllm:e2e_seconds:p95:by_role{role=\"stable\"}",
+              "expr": "sli:vllm:e2e_seconds:p95:by_role:rollout{role=\"stable\"}",
               "legendFormat": "stable",
-              "refId": "A",
+              "refId": "B",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2507,9 +3556,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "sli:vllm:e2e_seconds:p95:by_role{role=\"canary\"}",
+              "expr": "sli:vllm:e2e_seconds:p95:by_role:rollout{role=\"canary\"}",
               "legendFormat": "canary",
-              "refId": "B",
+              "refId": "C",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2542,7 +3591,7 @@ data:
                     "id": "color",
                     "value": {
                       "mode": "fixed",
-                      "fixedColor": "#3274D9"
+                      "fixedColor": "green"
                     }
                   }
                 ]
@@ -2557,7 +3606,7 @@ data:
                     "id": "color",
                     "value": {
                       "mode": "fixed",
-                      "fixedColor": "#CC6A22"
+                      "fixedColor": "orange"
                     }
                   }
                 ]
@@ -2580,10 +3629,10 @@ data:
           }
         },
         {
-          "id": 15,
+          "id": 26,
           "type": "timeseries",
           "title": "In-flight by role",
-          "description": "Paired with 'TTFT p95 by role', this is the cold-start finding: Envoy is LEAST_REQUEST with no slow_start_config, so a pod that has just gone Ready has almost nothing in flight, reads as idle, and is therefore PREFERRED -- at exactly the moment it is slowest. Canary at or above stable while its TTFT is worse is that inversion, on a graph.\n\nONLY meaningful during a rollout. At rest the vllm-stable and vllm-canary Services both select every pod, so each role reports the whole fleet and the two lines are duplicates. Never sum across roles -- that double counts.",
+          "description": "Queue depth is the leading indicator: it moves before TTFT does, because a request waits before it is slow.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROM}"
@@ -2592,7 +3641,7 @@ data:
             "h": 8,
             "w": 6,
             "x": 18,
-            "y": 13
+            "y": 39
           },
           "targets": [
             {
@@ -2602,7 +3651,7 @@ data:
               },
               "expr": "sli:vllm:requests_running:by_role{role=\"stable\"}",
               "legendFormat": "stable running",
-              "refId": "U",
+              "refId": "D",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2614,7 +3663,7 @@ data:
               },
               "expr": "sli:vllm:requests_running:by_role{role=\"canary\"}",
               "legendFormat": "canary running",
-              "refId": "V",
+              "refId": "E",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2626,7 +3675,7 @@ data:
               },
               "expr": "sli:vllm:requests_waiting:by_role{role=\"canary\"}",
               "legendFormat": "canary waiting",
-              "refId": "W",
+              "refId": "F",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2648,7 +3697,53 @@ data:
                 }
               }
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "stable running"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "canary running"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "orange"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "canary waiting"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              }
+            ]
           },
           "options": {
             "legend": {
@@ -2666,32 +3761,32 @@ data:
           }
         },
         {
-          "id": 12,
+          "id": 27,
           "type": "row",
-          "title": "Rollout and recovery",
+          "title": "Why the window matters",
           "collapsed": false,
           "gridPos": {
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 21
+            "y": 47
           },
           "panels": []
         },
         {
-          "id": 13,
+          "id": 28,
           "type": "timeseries",
-          "title": "Rollout phase",
-          "description": "Argo Rollouts controller state -- what puts 'a rollout was happening here' on the same timeline as the latency it explains. Filtered to the phase currently in effect; the controller publishes every phase as its own 0/1 series.\n\nThe label is `exported_namespace`, not `namespace`: `namespace` is already taken by the controller's own pod, so Prometheus renames the conflicting one.\n\nEmpty means the controller's metrics Service is missing -- bootstrap.sh installs the chart with controller.metrics.enabled=true to create it.",
+          "title": "TTFT p95: rollout window versus 5m",
+          "description": "The same SLI at two rate windows. The 5m line is the service-health view and it is deliberately smooth; the rollout line is the measurement instrument.\n\nA rollout is a ~500s event whose interesting windows are tens of seconds. A 5m rate window spreads a 30s degradation across twenty samples at reduced amplitude -- which is why a transition that clearly happened can leave the 5m curve almost flat. If the two lines diverge here, the 5m view is hiding something.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROM}"
           },
           "gridPos": {
-            "h": 7,
-            "w": 12,
+            "h": 8,
+            "w": 24,
             "x": 0,
-            "y": 22
+            "y": 48
           },
           "targets": [
             {
@@ -2699,9 +3794,33 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "rollout_phase{exported_namespace=\"inference\"} == 1",
-              "legendFormat": "{{name}}: {{phase}}",
-              "refId": "C",
+              "expr": "sli:vllm:ttft_seconds:p95:rollout",
+              "legendFormat": "rollout window",
+              "refId": "G",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:vllm:ttft_seconds:p95",
+              "legendFormat": "5m window",
+              "refId": "H",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "slo:objective:ttft_seconds",
+              "legendFormat": "objective",
+              "refId": "I",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2709,12 +3828,11 @@ data:
           ],
           "fieldConfig": {
             "defaults": {
-              "unit": "short",
-              "min": 0,
+              "unit": "s",
               "custom": {
                 "drawStyle": "line",
                 "lineWidth": 2,
-                "fillOpacity": 20,
+                "fillOpacity": 0,
                 "showPoints": "never",
                 "pointSize": 8,
                 "spanNulls": false,
@@ -2724,7 +3842,67 @@ data:
                 }
               }
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "rollout window"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "orange"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "5m window"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "blue"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "objective"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  }
+                ]
+              }
+            ]
           },
           "options": {
             "legend": {
@@ -2742,19 +3920,32 @@ data:
           }
         },
         {
-          "id": 14,
+          "id": 29,
+          "type": "row",
+          "title": "Disruption",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 56
+          },
+          "panels": []
+        },
+        {
+          "id": 30,
           "type": "timeseries",
-          "title": "vLLM replicas up",
-          "description": "Distinct vLLM pods Prometheus can reach. The dip and recovery here is the visual for recovery time after a preemption, a restart, or a rollout; `flow show slo` puts a number on it.\n\nCounted as DISTINCT pods, not as a sum of targets: outside a rollout both the stable and canary Services select every pod, so each one is scraped twice and a plain sum(up) reads double the replica count.",
+          "title": "Truncations, rejections and retries",
+          "description": "The three ways a rollout hurts a client, counted separately because they trade against each other.\n\ntruncated -- a 200 the client began reading and then lost. Unretryable: headers were already sent.\nrejected  -- the client got an error; retries exhausted or the failure was not retryable.\nretry-masked -- an upstream failure the retry policy hid. The client saw a clean 200 and paid the latency.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROM}"
           },
           "gridPos": {
-            "h": 7,
+            "h": 8,
             "w": 12,
-            "x": 12,
-            "y": 22
+            "x": 0,
+            "y": 57
           },
           "targets": [
             {
@@ -2762,9 +3953,33 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "count(group by (pod) (up{job=~\"vllm-.*\"} == 1))",
-              "legendFormat": "pods scraped",
-              "refId": "D",
+              "expr": "sli:envoy:truncations:rollout",
+              "legendFormat": "truncated/s",
+              "refId": "J",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:envoy:rejections:rate5m",
+              "legendFormat": "rejected/s",
+              "refId": "K",
+              "editorMode": "code",
+              "range": true,
+              "instant": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROM}"
+              },
+              "expr": "sli:envoy:retries_masked:rate5m",
+              "legendFormat": "retry-masked/s",
+              "refId": "L",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2772,8 +3987,7 @@ data:
           ],
           "fieldConfig": {
             "defaults": {
-              "unit": "none",
-              "min": 0,
+              "unit": "short",
               "custom": {
                 "drawStyle": "line",
                 "lineWidth": 2,
@@ -2787,106 +4001,53 @@ data:
                 }
               }
             },
-            "overrides": []
-          },
-          "options": {
-            "legend": {
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true,
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          }
-        },
-        {
-          "id": 16,
-          "type": "row",
-          "title": "Disruption",
-          "collapsed": false,
-          "gridPos": {
-            "h": 1,
-            "w": 24,
-            "x": 0,
-            "y": 29
-          },
-          "panels": []
-        },
-        {
-          "id": 17,
-          "type": "timeseries",
-          "title": "Truncations, rejections and retries",
-          "description": "What a rollout did to in-flight requests. Three outcomes, kept apart because only one of them is repairable by a retry.\n\nTRUNCATED: cut after response headers went downstream, so the client saw a 200 with a short body. Envoy cannot retry once headers are sent, and no vLLM metric records it -- a client-disconnect abort increments nothing, and the per-request histograms skip aborted requests. This counter is the only server-side evidence.\n\nREJECTED: the client got a 5xx; retries exhausted or not retryable.\n\nMASKED: a failure the retry policy hid. Watch this move opposite to truncations as the grace period is tuned.\n\nFleet-wide only: downstream_rq_tx_reset is HCM-scoped and carries no tenant label. For per-tenant or per-pod truncations use `flow show experiment`, which reads Envoy's access log.",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROM}"
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 30
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROM}"
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "truncated/s"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
               },
-              "expr": "sli:envoy:truncations:rate5m",
-              "legendFormat": "truncated/s",
-              "refId": "U",
-              "editorMode": "code",
-              "range": true,
-              "instant": false
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROM}"
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "rejected/s"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "orange"
+                    }
+                  }
+                ]
               },
-              "expr": "sli:envoy:rejections:rate5m",
-              "legendFormat": "rejected/s",
-              "refId": "V",
-              "editorMode": "code",
-              "range": true,
-              "instant": false
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROM}"
-              },
-              "expr": "sli:envoy:retries_masked:rate5m",
-              "legendFormat": "retry-masked/s",
-              "refId": "W",
-              "editorMode": "code",
-              "range": true,
-              "instant": false
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "reqps",
-              "custom": {
-                "drawStyle": "line",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "never",
-                "pointSize": 8,
-                "spanNulls": false,
-                "axisSoftMin": 0,
-                "stacking": {
-                  "mode": "none"
-                }
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "retry-masked/s"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "yellow"
+                    }
+                  }
+                ]
               }
-            },
-            "overrides": []
+            ]
           },
           "options": {
             "legend": {
@@ -2904,10 +4065,10 @@ data:
           }
         },
         {
-          "id": 18,
+          "id": 31,
           "type": "timeseries",
           "title": "Truncation ratio",
-          "description": "Truncations as a fraction of traffic, shaped like the error ratio so it can take a threshold later.\n\nDeliberately NOT part of sli:vllm:healthy yet. A truncation is a 200, so the SLO cannot currently see one -- a measured drain reported 100% availability while 9 streams were cut. Learn what this reads at rest and under a normal rollout across several runs, THEN wire it into the composite. A threshold picked before that aborts good rollouts.",
+          "description": "Truncations as a fraction of traffic, against its own objective. This is the objective a drain breaks and the other three do not.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROM}"
@@ -2916,7 +4077,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 30
+            "y": 57
           },
           "targets": [
             {
@@ -2924,9 +4085,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "sli:envoy:truncation_ratio:rate5m",
+              "expr": "sli:envoy:truncation_ratio:rollout",
               "legendFormat": "truncation ratio",
-              "refId": "U",
+              "refId": "M",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2936,9 +4097,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROM}"
               },
-              "expr": "slo:objective:error_ratio",
-              "legendFormat": "error-ratio objective (reference)",
-              "refId": "V",
+              "expr": "slo:objective:truncation_ratio",
+              "legendFormat": "objective",
+              "refId": "N",
               "editorMode": "code",
               "range": true,
               "instant": false
@@ -2960,7 +4121,52 @@ data:
                 }
               }
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "truncation ratio"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "objective"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "text"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  }
+                ]
+              }
+            ]
           },
           "options": {
             "legend": {

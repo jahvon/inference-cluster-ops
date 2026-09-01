@@ -191,6 +191,37 @@ spec:
             /
             clamp_min(sli:vllm:requests:rate5m or vector(0), 0.001)
 
+        # --- disruption, as the client experienced it ------------------------
+        # Recorded BEFORE the composite below, which reads the truncation ratio.
+        # Rules evaluate in group order.
+        #
+        # TRUNCATION. Envoy cannot retry once response headers have gone downstream
+        # so a stream cut mid-generation reaches the client as a 200 with a short body.
+        - record: sli:envoy:truncations:rate5m
+          expr: sum(rate(envoy_http_downstream_rq_tx_reset{envoy_http_conn_manager_prefix="vllm"}[5m])) or vector(0)
+
+        # REJECTION: the client got an error. Retries were exhausted or the failure
+        # was not retryable.
+        #
+        # It is `_rq_xx` with a response-class label. There is no `_rq_5xx` series --
+        # the old name resolved to nothing and `or vector(0)` reported it as zero.
+        - record: sli:envoy:rejections:rate5m
+          expr: |
+            sum(rate(envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="vllm",
+                                                 envoy_response_code_class="5"}[5m])) or vector(0)
+
+        # MASKED: a failure the retry policy hid so the client saw a clean 200. This
+        # is the number that makes the retry policy's value visible.
+        - record: sli:envoy:retries_masked:rate5m
+          expr: sum(rate(envoy_cluster_upstream_rq_retry_success{envoy_cluster_name="vllm"}[5m])) or vector(0)
+
+        # Truncations as a FRACTION of traffic
+        - record: sli:envoy:truncation_ratio:rate5m
+          expr: |
+            (sli:envoy:truncations:rate5m or vector(0))
+            /
+            clamp_min(sum(rate(envoy_cluster_upstream_rq{envoy_cluster_name="vllm"}[5m])) or vector(0), 0.001)
+
         # The composite SLI: 1 when every objective holds, 0 when any is breached.
         # This single series is what makes "SLO violations during a rollout" and
         # "recovery time" computable at all -- scripts/slo-report.sh range-queries it
@@ -208,6 +239,8 @@ spec:
         #
         # `(x >= 0)` is a filter, not a comparison-to-bool: NaN fails it, the series
         # drops out, and `or vector(1)` can then do its job.
+        #
+        # The truncation term needs no such guard -- its inputs carry `or vector(0)`.
         - record: sli:vllm:healthy
           expr: |
             (((sli:vllm:ttft_seconds:p95 >= 0) < bool ${TTFT_P95_THRESHOLD}) or vector(1))
@@ -215,31 +248,8 @@ spec:
             (((sli:vllm:tpot_seconds:p95 >= 0) < bool ${TPOT_P95_THRESHOLD}) or vector(1))
             *
             ((sli:envoy:error_ratio:rate5m < bool ${ERROR_RATIO_SLO}) or vector(1))
-
-        # --- disruption, as the client experienced it ------------------------
-        # TRUNCATION. Envoy cannot retry once response headers have gone downstream
-        # so a stream cut mid-generation reaches the client as a 200 with a short body.
-        #
-        # The access log in k8s/20-envoy.yaml carries the tenant dimension.
-        - record: sli:envoy:truncations:rate5m
-          expr: sum(rate(envoy_http_downstream_rq_tx_reset{envoy_http_conn_manager_prefix="vllm"}[5m])) or vector(0)
-
-        # REJECTION: the client got an error. Retries were exhausted or the failure
-        # was not retryable.
-        - record: sli:envoy:rejections:rate5m
-          expr: sum(rate(envoy_http_downstream_rq_5xx{envoy_http_conn_manager_prefix="vllm"}[5m])) or vector(0)
-
-        # MASKED: a failure the retry policy hid so the client saw a clean 200. This
-        # is the number that makes the retry policy's value visible.
-        - record: sli:envoy:retries_masked:rate5m
-          expr: sum(rate(envoy_cluster_upstream_rq_retry_success{envoy_cluster_name="vllm"}[5m])) or vector(0)
-
-        # Truncations as a FRACTION of traffic
-        - record: sli:envoy:truncation_ratio:rate5m
-          expr: |
-            (sli:envoy:truncations:rate5m or vector(0))
-            /
-            clamp_min(sum(rate(envoy_cluster_upstream_rq{envoy_cluster_name="vllm"}[5m])) or vector(0), 0.001)
+            *
+            ((sli:envoy:truncation_ratio:rate5m < bool ${TRUNCATION_RATIO_SLO}) or vector(1))
 
         - record: sli:vllm:violating
           expr: 1 - sli:vllm:healthy
@@ -257,3 +267,116 @@ spec:
           expr: vector(${TPOT_P95_THRESHOLD})
         - record: slo:objective:error_ratio
           expr: vector(${ERROR_RATIO_SLO})
+        - record: slo:objective:truncation_ratio
+          expr: vector(${TRUNCATION_RATIO_SLO})
+
+    # ---------------------------------------------------------------------------
+    # Rollout-scoped SLIs.
+    #
+    # Identical definitions to the :rate5m family above, over ${ROLLOUT_WINDOW}. A
+    # rollout is a ~500s event and the windows that matter inside it are tens of
+    # seconds; a 5m window spreads a 30s degradation across twenty samples at
+    # reduced amplitude, which is why the curves look flat.
+    #
+    # Both families are kept. :rate5m stays the definition of "is the service
+    # healthy"; these are the measurement instrument for a transition, and the
+    # canary gate reads them so the gate and the dashboards show the same number.
+    # ---------------------------------------------------------------------------
+    - name: inference-sli-rollout
+      interval: 15s
+      rules:
+        - record: sli:vllm:ttft_seconds:p95:rollout
+          expr: histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[${ROLLOUT_WINDOW}])))
+        - record: sli:vllm:tpot_seconds:p95:rollout
+          expr: histogram_quantile(0.95, sum by (le) (rate(vllm:request_time_per_output_token_seconds_bucket[${ROLLOUT_WINDOW}])))
+
+        # By role is the rollout signal: a canary that is 5x slower barely moves the
+        # fleet aggregate while it holds only one pod's share of traffic.
+        - record: sli:vllm:ttft_seconds:p95:by_role:rollout
+          expr: histogram_quantile(0.95, sum by (le, role) (rate(vllm:time_to_first_token_seconds_bucket[${ROLLOUT_WINDOW}])))
+        - record: sli:vllm:tpot_seconds:p95:by_role:rollout
+          expr: histogram_quantile(0.95, sum by (le, role) (rate(vllm:request_time_per_output_token_seconds_bucket[${ROLLOUT_WINDOW}])))
+        - record: sli:vllm:e2e_seconds:p95:by_role:rollout
+          expr: histogram_quantile(0.95, sum by (le, role) (rate(vllm:e2e_request_latency_seconds_bucket[${ROLLOUT_WINDOW}])))
+
+        # Per-role error ratio, so the gate can ask about the canary alone.
+        - record: sli:vllm:error_ratio:by_role:rollout
+          expr: |
+            (sum by (role) (avg by (pod, engine, role) (rate(vllm:request_success_total{finished_reason="error"}[${ROLLOUT_WINDOW}]))) or vector(0))
+            /
+            clamp_min(sum by (role) (avg by (pod, engine, role) (rate(vllm:request_success_total[${ROLLOUT_WINDOW}]))), 0.001)
+
+        - record: sli:envoy:error_ratio:rollout
+          expr: |
+            (sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name="vllm",envoy_response_code_class="5"}[${ROLLOUT_WINDOW}])) or vector(0))
+            /
+            clamp_min(sum(rate(envoy_cluster_upstream_rq{envoy_cluster_name="vllm"}[${ROLLOUT_WINDOW}])) or vector(0), 0.001)
+
+        - record: sli:envoy:truncations:rollout
+          expr: sum(rate(envoy_http_downstream_rq_tx_reset{envoy_http_conn_manager_prefix="vllm"}[${ROLLOUT_WINDOW}])) or vector(0)
+        - record: sli:envoy:truncation_ratio:rollout
+          expr: |
+            (sli:envoy:truncations:rollout or vector(0))
+            /
+            clamp_min(sum(rate(envoy_cluster_upstream_rq{envoy_cluster_name="vllm"}[${ROLLOUT_WINDOW}])) or vector(0), 0.001)
+
+        # Same composite, same guards, short window.
+        - record: sli:vllm:healthy:rollout
+          expr: |
+            (((sli:vllm:ttft_seconds:p95:rollout >= 0) < bool ${TTFT_P95_THRESHOLD}) or vector(1))
+            *
+            (((sli:vllm:tpot_seconds:p95:rollout >= 0) < bool ${TPOT_P95_THRESHOLD}) or vector(1))
+            *
+            ((sli:envoy:error_ratio:rollout < bool ${ERROR_RATIO_SLO}) or vector(1))
+            *
+            ((sli:envoy:truncation_ratio:rollout < bool ${TRUNCATION_RATIO_SLO}) or vector(1))
+
+        - record: sli:vllm:violating:rollout
+          expr: 1 - sli:vllm:healthy:rollout
+
+    # ---------------------------------------------------------------------------
+    # The instrument itself.
+    #
+    # Argo's own controller metrics, renamed into the sli: namespace so the
+    # dashboards read one vocabulary. `exported_namespace` is the workload's
+    # namespace -- `namespace` on these series is argo-rollouts, where the
+    # controller runs.
+    #
+    # capacity_ratio is what makes a maxSurge:0 rollout legible: the fleet drops to
+    # (N-1)/N for the whole pod-replacement window, and no latency percentile shows
+    # that as long as the surviving pods absorb the traffic.
+    # ---------------------------------------------------------------------------
+    - name: inference-rollout-state
+      interval: 15s
+      rules:
+        - record: sli:rollout:replicas_desired
+          expr: max by (name) (rollout_info_replicas_desired{exported_namespace="inference"})
+        - record: sli:rollout:replicas_available
+          expr: max by (name) (rollout_info_replicas_available{exported_namespace="inference"})
+        - record: sli:rollout:replicas_updated
+          expr: max by (name) (rollout_info_replicas_updated{exported_namespace="inference"})
+        - record: sli:rollout:replicas_unavailable
+          expr: max by (name) (rollout_info_replicas_unavailable{exported_namespace="inference"})
+
+        - record: sli:rollout:capacity_ratio
+          expr: |
+            sli:rollout:replicas_available
+            /
+            clamp_min(sli:rollout:replicas_desired, 1)
+
+        # 1 while a rollout is in flight. The dashboards use this to shade the
+        # rollout window behind every other panel.
+        # No `or vector(0)` fallback: rollout_phase publishes every phase as its own
+        # 0/1 series, so this is never absent -- and the fallback would append a
+        # second, label-less series alongside the real one.
+        - record: sli:rollout:in_progress
+          expr: max by (name) (rollout_phase{exported_namespace="inference",phase="Progressing"})
+
+        # The gate's own verdict. These are COUNTS of AnalysisRuns, not a current
+        # state: Argo retains finished runs, so a `max` over them would latch at 1
+        # after the first failure and never clear. Counting instead makes each new
+        # failure a visible step.
+        - record: sli:analysis:running
+          expr: sum(analysis_run_phase{exported_namespace="inference",phase="Running"} == 1) or vector(0)
+        - record: sli:analysis:metric_failed
+          expr: sum by (metric) (analysis_run_metric_phase{exported_namespace="inference",phase=~"Failed|Error|Inconclusive"} == 1)

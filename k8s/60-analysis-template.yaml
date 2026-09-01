@@ -1,6 +1,14 @@
 # Gate the canary on measured behavior.
 #
 # ---------------------------------------------------------------------------
+# The queries read the sli: recording rules from k8s/50-prometheus-rules.yaml
+# rather than computing their own quantiles. The gate and the dashboards then
+# show the SAME series, which is the point: when a rollout is aborted you can
+# look at the panel and see the number that aborted it.
+#
+# The window is ROLLOUT_WINDOW, shared with those rules. There is no separate
+# gate window or gate quantile to drift out of sync.
+# ---------------------------------------------------------------------------
 # Every query ends in `>= 0`, and that is load-bearing.
 #
 # With no traffic in the window, histogram_quantile does not return an empty vector
@@ -11,6 +19,13 @@
 #
 # `>= 0` is a filter: NaN fails it, the series drops out, the result really is empty,
 # and the len() guard does its job.
+#
+# It also means a canary that is not serving yet reads as PASSING. That is correct
+# for an idle fleet and wrong for a cold start, where "not serving" is the failure --
+# ---------------------------------------------------------------------------
+# Truncations are deliberately absent. They are counted at Envoy's downstream
+# listener, which has no canary/stable dimension, so the gate cannot attribute one
+# to the revision under test. The SLO counts them; the gate cannot.
 # ---------------------------------------------------------------------------
 apiVersion: argoproj.io/v1alpha1
 kind: AnalysisTemplate
@@ -20,8 +35,8 @@ metadata:
 spec:
   metrics:
     - name: p95-ttft
-      # A pod that has served nothing produces no histogram. Wait before the
-      # first query.
+      # A pod that has served nothing produces no histogram. Wait one full window
+      # before the first query, so that query covers a complete window.
       initialDelay: ${GATE_INITIAL_DELAY}
       interval: ${GATE_INTERVAL}
       count: ${GATE_COUNT}
@@ -32,9 +47,7 @@ spec:
         prometheus:
           address: ${PROM_URL}
           query: |
-            histogram_quantile(${GATE_QUANTILE},
-              sum(rate(vllm:time_to_first_token_seconds_bucket{role="canary"}[${GATE_RATE_WINDOW}]))
-              by (le)) >= 0
+            sli:vllm:ttft_seconds:p95:by_role:rollout{role="canary"} >= 0
 
     # Decode speed. TTFT can look perfect while generation crawls -- a change that
     # slows per-token decode shows up here and nowhere else in this template.
@@ -49,15 +62,10 @@ spec:
         prometheus:
           address: ${PROM_URL}
           query: |
-            histogram_quantile(${GATE_QUANTILE},
-              sum(rate(vllm:request_time_per_output_token_seconds_bucket{role="canary"}[${GATE_RATE_WINDOW}]))
-              by (le)) >= 0
+            sli:vllm:tpot_seconds:p95:by_role:rollout{role="canary"} >= 0
 
     # Correctness, not speed: a canary that is fast because it is failing fast would
     # sail through both latency gates above.
-    #
-    # clamp_min keeps the ratio defined when the canary has served nothing; the
-    # numerator is then 0, so the result is a clean 0 rather than a divide by zero.
     - name: error-ratio
       initialDelay: ${GATE_INITIAL_DELAY}
       interval: ${GATE_INTERVAL}
@@ -69,6 +77,4 @@ spec:
         prometheus:
           address: ${PROM_URL}
           query: |
-            (sum(rate(vllm:request_success_total{role="canary",finished_reason="error"}[${GATE_RATE_WINDOW}])) or vector(0))
-            /
-            clamp_min(sum(rate(vllm:request_success_total{role="canary"}[${GATE_RATE_WINDOW}])) or vector(0), 0.001)
+            sli:vllm:error_ratio:by_role:rollout{role="canary"} >= 0

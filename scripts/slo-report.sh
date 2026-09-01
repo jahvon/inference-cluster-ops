@@ -19,17 +19,40 @@ STEP="${SLO_STEP:-15s}"
 FROM="${SLO_FROM:-}"
 TO="${SLO_TO:-}"
 
+# Which SLI family to measure against.
+#
+#   service   the :rate5m family -- "is the service healthy", what `flow show slo`
+#             asks. Smooth on purpose.
+#   rollout   the short-window family. A rollout is a ~500s event and a 5m rate
+#             window buries the transitions inside it, so the experiment harness
+#             asks for this one.
+#
+# Both are recorded from the same definitions over different windows, so the two
+# reports are comparable -- they differ only in how much they smooth.
+SCOPE="${SLO_SCOPE:-service}"
+case "$SCOPE" in service|rollout) ;; *)
+  echo "  SLO_SCOPE must be 'service' or 'rollout', got '$SCOPE'" >&2; exit 1 ;;
+esac
+ROLLOUT_WINDOW="$(cfg ROLLOUT_WINDOW 1m)"
+
 bash scripts/tunnel.sh ensure >/dev/null || exit 1
 
 export KUBECONFIG="$PWD/kubeconfig"
 
-RANGE="$RANGE" STEP="$STEP" FROM="$FROM" TO="$TO" python3 - <<'PY'
+RANGE="$RANGE" STEP="$STEP" FROM="$FROM" TO="$TO" \
+SCOPE="$SCOPE" ROLLOUT_WINDOW="$ROLLOUT_WINDOW" python3 - <<'PY'
 import json, os, subprocess, sys, time, urllib.parse
 
 RANGE = os.environ["RANGE"]
 STEP = os.environ["STEP"]
 FROM = os.environ.get("FROM", "").strip()
 TO = os.environ.get("TO", "").strip()
+SCOPE = os.environ["SCOPE"]
+ROLLOUT_WINDOW = os.environ["ROLLOUT_WINDOW"]
+
+# The four SLO-defining SLIs exist in both families; everything else in `current`
+# is recorded at 5m only and is reported as-is.
+SUF = ":rollout" if SCOPE == "rollout" else ""
 
 # The operator-managed service name, fixed regardless of the helm release name.
 PROXY = ("/api/v1/namespaces/monitoring/services/prometheus-operated:9090"
@@ -75,9 +98,14 @@ def scalar(expr):
     if err or not res:
         return None
     try:
-        return float(res[0]["value"][1])
+        v = float(res[0]["value"][1])
     except (KeyError, IndexError, ValueError):
         return None
+    # A latency quantile over an idle window is NaN, not absent. json.dumps writes
+    # that as a bare NaN, which is not valid JSON and which the doc renderer
+    # rejects -- so an idle cluster would produce a report nothing could read.
+    # None becomes null, and the templates already guard for it.
+    return None if v != v else v
 
 
 step = dur(STEP)
@@ -110,14 +138,15 @@ report = {
               "from": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t_from)),
               "to": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t_to)),
               "from_epoch": round(t_from, 3), "to_epoch": round(t_to, 3),
-              # Every sli: rule is a rate(...[5m]), so a window shorter than 5m is
-              # dominated by traffic from before it. The harness reports this rather
+              # The rate window behind the SLIs. A report window shorter than this
+              # is dominated by traffic from before it, so it is published rather
               # than implying a precision the smoothing cannot deliver.
-              "smoothed_by_seconds": 300},
+              "scope": SCOPE,
+              "smoothed_by_seconds": dur(ROLLOUT_WINDOW) if SCOPE == "rollout" else 300},
 }
 
 series, err = promq("query_range", {
-    "query": "sli:vllm:healthy", "start": f"{t_from:.0f}",
+    "query": f"sli:vllm:healthy{SUF}", "start": f"{t_from:.0f}",
     "end": f"{t_to:.0f}", "step": f"{step:.0f}",
 })
 
@@ -131,7 +160,7 @@ if err is not None:
 
 if not series:
     report["available"] = False
-    report["reason"] = ("no sli:vllm:healthy series -- the recording rules in "
+    report["reason"] = (f"no sli:vllm:healthy{SUF} series -- the recording rules in "
                         "k8s/50-prometheus-rules.yaml are not loaded, or Prometheus "
                         "has not evaluated them yet (they need one interval)")
     print(json.dumps(report, indent=2))
@@ -191,20 +220,24 @@ report["objectives"] = {
     "ttft_p95_seconds": scalar("slo:objective:ttft_seconds"),
     "tpot_p95_seconds": scalar("slo:objective:tpot_seconds"),
     "error_ratio": scalar("slo:objective:error_ratio"),
+    "truncation_ratio": scalar("slo:objective:truncation_ratio"),
 }
 
 report["current"] = {
     "ttft_p50_seconds": scalar("sli:vllm:ttft_seconds:p50"),
-    "ttft_p95_seconds": scalar("sli:vllm:ttft_seconds:p95"),
+    "ttft_p95_seconds": scalar(f"sli:vllm:ttft_seconds:p95{SUF}"),
     "ttft_p99_seconds": scalar("sli:vllm:ttft_seconds:p99"),
-    "tpot_p95_seconds": scalar("sli:vllm:tpot_seconds:p95"),
+    "tpot_p95_seconds": scalar(f"sli:vllm:tpot_seconds:p95{SUF}"),
     "itl_p99_seconds": scalar("sli:vllm:itl_seconds:p99"),
     "e2e_p50_seconds": scalar("sli:vllm:e2e_seconds:p50"),
     "e2e_p95_seconds": scalar("sli:vllm:e2e_seconds:p95"),
     "e2e_p99_seconds": scalar("sli:vllm:e2e_seconds:p99"),
     "queue_p95_seconds": scalar("sli:vllm:queue_seconds:p95"),
     "queue_p99_seconds": scalar("sli:vllm:queue_seconds:p99"),
-    "error_ratio": scalar("sli:envoy:error_ratio:rate5m"),
+    "error_ratio": scalar(f"sli:envoy:error_ratio:{'rollout' if SCOPE == 'rollout' else 'rate5m'}"),
+    # Streams cut off mid-generation. Neither error ratio above counts one -- the
+    # client already had a 200.
+    "truncation_ratio": scalar(f"sli:envoy:truncation_ratio:{'rollout' if SCOPE == 'rollout' else 'rate5m'}"),
     "output_tokens_per_second": scalar("sli:vllm:output_tokens:rate5m"),
     "output_tokens_per_gpu": scalar("sli:vllm:output_tokens_per_gpu:rate5m"),
     "output_tokens_per_stream": scalar("sli:vllm:output_tokens_per_stream:rate5m"),
@@ -215,6 +248,29 @@ report["current"] = {
     "gpu_engine_active": scalar("sli:gpu:engine_active"),
     "gpu_util_coarse": scalar("sli:gpu:util_coarse"),
 }
+
+# Serving capacity across the window. With maxSurge:0 the fleet runs at (N-1)/N for
+# the whole pod-replacement window, and no latency percentile shows that as long as
+# the surviving pods absorb the traffic -- so it needs its own number.
+cap, caperr = promq("query_range", {
+    "query": "sli:rollout:capacity_ratio", "start": f"{t_from:.0f}",
+    "end": f"{t_to:.0f}", "step": f"{step:.0f}",
+})
+if caperr or not cap:
+    report["capacity"] = {"available": False}
+else:
+    vals = [float(v) for _, v in cap[0]["values"]]
+    degraded = sum(1 for v in vals if v < 0.999)
+    report["capacity"] = {
+        "available": True,
+        "min_ratio": round(min(vals), 4),
+        "mean_ratio": round(sum(vals) / len(vals), 4),
+        "samples": len(vals),
+        "degraded_samples": degraded,
+        "seconds_below_full": round(degraded * step, 1),
+        "replicas_desired": scalar("sli:rollout:replicas_desired"),
+        "replicas_available": scalar("sli:rollout:replicas_available"),
+    }
 
 _tp = {"query": "sli:tenant:requests:rate5m"}
 if AT is not None:

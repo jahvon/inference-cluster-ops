@@ -95,6 +95,10 @@ cleanup() {
   rc=$?
   echo "" >&2
   echo "  restoring..." >&2
+  # The loop kills the timeline collector on the normal path; an interrupt lands
+  # here instead, and without this it is left polling the cluster and appending to
+  # a finished run's file for the rest of the session.
+  [ -n "${TL_PID:-}" ] && kill "$TL_PID" 2>/dev/null
   [ "$STARTED_LOAD" -eq 1 ] && bash scripts/load.sh stop >/dev/null 2>&1
   # Back to the baseline revision. Dropping the overrides is itself a pod-template
   # change, which is what makes Argo roll forward onto clean config -- and re-applying
@@ -224,7 +228,9 @@ json.dump({
 }, open(sys.argv[1], "w"), indent=2)
 META
 
-  SLO_FROM="$T_START" SLO_TO="$((T_END + SETTLE))" \
+  # Rollout scope: the short-window SLI family. A 5m rate window would smear this
+  # ~500s rollout together with the steady state before it.
+  SLO_SCOPE=rollout SLO_FROM="$T_START" SLO_TO="$((T_END + SETTLE))" \
     bash scripts/slo-report.sh > "$DIR/slo.json" 2>/dev/null
 
   echo "  wrote $DIR" >&2

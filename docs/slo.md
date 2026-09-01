@@ -33,8 +33,24 @@ Check that Prometheus is up and the rules are loaded:
 | TTFT p95 | {{ string(data["objectives"]["ttft_p95_seconds"]) }}s | {{ string(data["current"]["ttft_p95_seconds"]) }}s |
 | TPOT p95 | {{ string(data["objectives"]["tpot_p95_seconds"]) }}s | {{ string(data["current"]["tpot_p95_seconds"]) }}s |
 | error ratio | {{ string(data["objectives"]["error_ratio"]) }} | {{ string(data["current"]["error_ratio"]) }} |
+{{ if data["objectives"]["truncation_ratio"] != nil }}| truncation ratio | {{ string(data["objectives"]["truncation_ratio"]) }} | {{ string(data["current"]["truncation_ratio"]) }} |
+{{ end }}
+Objectives come from `k8s/config.env`. The canary gate uses the first three; it
+cannot see truncations, which are counted at Envoy's downstream listener and carry
+no canary/stable dimension.
+{{ if data["capacity"] != nil }}{{ if data["capacity"]["available"] }}
+## Serving capacity
 
-Objectives come from `k8s/config.env`. The canary gate uses the same numbers.
+| | |
+|---|---|
+| replicas available / desired | {{ string(data["capacity"]["replicas_available"]) }} / {{ string(data["capacity"]["replicas_desired"]) }} |
+| lowest over window | {{ string(data["capacity"]["min_ratio"]) }} |
+| time below full | {{ string(data["capacity"]["seconds_below_full"]) }}s |
+
+With `maxSurge: 0` a rollout converts pods rather than adding them, so the fleet
+runs below full for the whole replacement window. No latency objective shows that
+while the surviving pods still absorb the traffic.
+{{ end }}{{ end }}
 
 ## Latency
 

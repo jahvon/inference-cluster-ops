@@ -16,8 +16,13 @@ INTERVAL="${TIMELINE_INTERVAL:-2}"
 
 export KUBECONFIG="${KUBECONFIG:-$PWD/kubeconfig}"
 
-OUT="$OUT" INTERVAL="$INTERVAL" python3 - <<'PY'
-import json, os, subprocess, sys, time
+# exec, so the PID run.sh backgrounded IS the poller. Without it $! is this bash
+# wrapper, `kill` reaps only the wrapper, and the python child is reparented to init
+# and goes on appending to a finished run's timeline for the rest of the session --
+# one leaked poller per iteration, each re-polling the cluster over the SSH tunnel.
+export OUT INTERVAL
+exec python3 - <<'PY'
+import json, os, signal, subprocess, sys, time
 
 OUT = os.environ["OUT"]
 INTERVAL = float(os.environ["INTERVAL"])
@@ -86,6 +91,15 @@ def poll():
         elif kind == "AnalysisRun":
             emit("analysis", name, phase=st.get("phase"), message=st.get("message"))
 
+
+# run.sh stops this with SIGTERM, whose default disposition kills the process
+# without unwinding -- so the `finally` below never runs and the file ends with no
+# `stop` event. Routing it to KeyboardInterrupt reuses the path SIGINT already takes.
+def on_sigterm(signum, frame):
+    raise KeyboardInterrupt
+
+
+signal.signal(signal.SIGTERM, on_sigterm)
 
 emit("timeline", "start", note="polling began")
 try:
