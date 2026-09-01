@@ -124,7 +124,7 @@ echo "  starting background load..." >&2
 # does). Define it before this first source or `set -u` aborts here; the loop
 # re-sources with the real value before anything uses it.
 export RUN_ID=""
-set -a; . "$OVERLAY"; set +a
+set -a; . "$OVERLAY" || { echo "  Overlay $OVERLAY failed to load." >&2; exit 1; }; set +a
 bash scripts/load.sh start || { echo "  Could not start the load generators." >&2; exit 1; }
 STARTED_LOAD=1
 
@@ -142,7 +142,7 @@ for i in $(seq 1 "$REPEAT"); do
   # Re-sourced per iteration because an overlay may interpolate RUN_ID.
   export RUN_ID
   export EXPERIMENT_NONCE="$RUN_ID"
-  set -a; . "$OVERLAY"; set +a
+  set -a; . "$OVERLAY" || { echo "  Overlay $OVERLAY failed to load." >&2; exit 1; }; set +a
 
   # A cold-cache variant writes into a subdir of the SAME hostPath mount, so the
   # warm cache the stable pods use is untouched and cleanup has a real path to
@@ -150,15 +150,6 @@ for i in $(seq 1 "$REPEAT"); do
   case "${HF_HOME_PATH:-}" in
     "$CTR_CACHE"/*) COLD_DIRS="$COLD_DIRS $HOST_CACHE/${HF_HOME_PATH#$CTR_CACHE/}" ;;
   esac
-
-  # The ungated arm. spec.strategy is not part of the pod-template hash, so removing
-  # the analysis step does not itself trigger a rollout -- it only changes what the
-  # next one is judged by.
-  if [ "${ROLLOUT_ANALYSIS:-on}" = "off" ]; then
-    echo "  removing the analysis gate (ungated arm)" >&2
-    kubectl -n inference patch rollout vllm --type=json \
-      -p '[{"op":"remove","path":"/spec/strategy/canary/steps/1"}]' >/dev/null 2>&1
-  fi
 
   # Nothing to deploy for measurement: Envoy is already in the path and already
   # writing a JSON access-log record per request. All this needs is a timestamp to
@@ -177,6 +168,25 @@ for i in $(seq 1 "$REPEAT"); do
     echo "  apply failed; see $DIR/deploy.log" >&2
     kill "$TL_PID" 2>/dev/null
     exit 1
+  fi
+
+  # The ungated arm, and this MUST come after apply_revision rather than before.
+  # apply_revision re-applies the rendered Rollout, whose spec.strategy declares both
+  # steps, so a patch made first is silently restored seconds later and the arm runs
+  # gated -- indistinguishable from the stock arm.
+  #
+  # Safe here: spec.strategy is not part of the pod-template hash, and Argo is still
+  # on step 0 waiting for the canary to become Ready, so step 1 is removed well
+  # before it would be reached.
+  if [ "${ROLLOUT_ANALYSIS:-on}" = "off" ]; then
+    echo "  removing the analysis gate (ungated arm)" >&2
+    kubectl -n inference patch rollout vllm --type=json \
+      -p '[{"op":"remove","path":"/spec/strategy/canary/steps/1"}]' >/dev/null 2>&1
+    STEPS=$(kubectl -n inference get rollout vllm -o jsonpath='{.spec.strategy.canary.steps[*]}' 2>/dev/null)
+    case "$STEPS" in
+      *analysis*) echo "  ERROR: the analysis step is still present; this arm would run gated." >&2
+                  kill "$TL_PID" 2>/dev/null; exit 1 ;;
+    esac
   fi
 
   # Wait for the controller to notice, then for a terminal phase. Waiting on phase
